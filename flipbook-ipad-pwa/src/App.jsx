@@ -1,0 +1,514 @@
+import { useState, useRef, useEffect, useCallback } from "react";
+
+const MAX_FRAMES = 60;
+const STORAGE_KEY = "flipbook_v3";
+const BG = "#ffffff";
+const PRESETS = [
+  { label: "400×300", w: 400, h: 300 },
+  { label: "640×480", w: 640, h: 480 },
+  { label: "1280×720", w: 1280, h: 720 },
+];
+const SWATCHES = ["#000000","#ffffff","#ef4444","#f97316","#eab308","#22c55e","#3b82f6","#a855f7","#ec4899","#6b7280","#0f172a","#94a3b8"];
+
+function hexToRgb(h){return[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];}
+
+function floodFill(ctx,x,y,fc,W,H){
+  const[fr,fg,fb]=hexToRgb(fc),img=ctx.getImageData(0,0,W,H),d=img.data;
+  x=Math.max(0,Math.min(W-1,Math.floor(x)));y=Math.max(0,Math.min(H-1,Math.floor(y)));
+  const b=(y*W+x)*4,[tr,tg,tb,ta]=[d[b],d[b+1],d[b+2],d[b+3]];
+  if(tr===fr&&tg===fg&&tb===fb)return;
+  const s=[[x,y]];
+  while(s.length){
+    const[cx,cy]=s.pop();
+    if(cx<0||cy<0||cx>=W||cy>=H)continue;
+    const i=(cy*W+cx)*4;
+    if(d[i]!==tr||d[i+1]!==tg||d[i+2]!==tb||d[i+3]!==ta)continue;
+    d[i]=fr;d[i+1]=fg;d[i+2]=fb;d[i+3]=255;
+    s.push([cx+1,cy],[cx-1,cy],[cx,cy+1],[cx,cy-1]);
+  }
+  ctx.putImageData(img,0,0);
+}
+
+async function loadImg(ctx,url,w,h){
+  return new Promise(r=>{
+    ctx.fillStyle=BG;ctx.fillRect(0,0,w,h);
+    if(!url){r();return;}
+    const img=new Image();img.onload=()=>{ctx.drawImage(img,0,0);r();};img.onerror=r;img.src=url;
+  });
+}
+
+async function doExport(fd,fc,durs,fps,W,H,onP,onDone,onErr){
+  try{
+    const off=document.createElement("canvas");off.width=W;off.height=H;
+    const ctx=off.getContext("2d"),stream=off.captureStream(60);
+    const mime=["video/webm;codecs=vp9","video/webm;codecs=vp8","video/webm"].find(m=>MediaRecorder.isTypeSupported(m))||"video/webm";
+    const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:6e6}),chunks=[];
+    rec.ondataavailable=e=>{if(e.data.size>0)chunks.push(e.data);};
+    rec.onstop=()=>{
+      const blob=new Blob(chunks,{type:mime}),url=URL.createObjectURL(blob),a=document.createElement("a");
+      a.href=url;a.download="animation.webm";a.click();URL.revokeObjectURL(url);onDone();
+    };
+    rec.start();
+    for(let i=0;i<fc;i++){
+      await loadImg(ctx,fd[i],W,H);
+      const dur=durs[i]??Math.round(1000/fps),end=performance.now()+dur;
+      while(performance.now()<end)await new Promise(r=>setTimeout(r,8));
+      onP(Math.round(((i+1)/fc)*100));
+    }
+    rec.stop();
+  }catch(e){onErr(e.message);}
+}
+
+// ── tiny UI primitives ────────────────────────────────────────────
+const T = {
+  bg:     "#f8f8f7",
+  panel:  "#ffffff",
+  border: "#e2e2df",
+  borderAct: "#a0a09c",
+  text:   "#1a1a18",
+  muted:  "#888884",
+  hint:   "#b8b8b4",
+  blue:   "#2563eb",
+  blueBg: "#eff6ff",
+  red:    "#dc2626",
+  redBg:  "#fef2f2",
+  font:   "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+};
+
+function Panel({children, style={}}){
+  return(
+    <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:8,padding:8,...style}}>
+      {children}
+    </div>
+  );
+}
+
+function IcoBtn({children, active, danger, onClick, title, style={}}){
+  return(
+    <button onClick={onClick} title={title} style={{
+      display:"flex",alignItems:"center",justifyContent:"center",gap:4,
+      width:32,height:32,padding:0,flexShrink:0,
+      background: active ? T.blueBg : danger ? T.redBg : "transparent",
+      border:`1px solid ${active ? T.blue : danger ? T.red : T.border}`,
+      borderRadius:6,cursor:"pointer",
+      color: active ? T.blue : danger ? T.red : T.muted,
+      fontSize:13,...style,
+    }}>{children}</button>
+  );
+}
+
+function TextBtn({children, onClick, primary, danger, disabled, style={}}){
+  return(
+    <button onClick={onClick} disabled={disabled} style={{
+      display:"flex",alignItems:"center",justifyContent:"center",gap:4,
+      height:30,padding:"0 10px",
+      background: primary ? T.blue : danger ? T.redBg : T.panel,
+      border:`1px solid ${primary ? T.blue : danger ? T.red : T.border}`,
+      borderRadius:6,cursor:disabled?"not-allowed":"pointer",
+      color: primary ? "#fff" : danger ? T.red : T.text,
+      fontSize:12,opacity:disabled?0.5:1,whiteSpace:"nowrap",...style,
+    }}>{children}</button>
+  );
+}
+
+export default function App(){
+  const[W,setW]=useState(400);
+  const[H,setH]=useState(300);
+  const[showRes,setShowRes]=useState(false);
+  const[customW,setCustomW]=useState(400);
+  const[customH,setCustomH]=useState(300);
+
+  const[frameCount,setFrameCount]=useState(1);
+  const[current,setCurrent]=useState(0);
+  const fd=useRef({});
+  const thumbs=useRef({});
+  const[thumbVer,setThumbVer]=useState(0);
+  const bump=useCallback(()=>setThumbVer(v=>v+1),[]);
+
+  const[tool,setTool]=useState("pen");
+  const[color,setColor]=useState("#000000");
+  const[size,setSize]=useState(4);
+  const[showOnion,setShowOnion]=useState(true);
+
+  const[isPlaying,setIsPlaying]=useState(false);
+  const[fps,setFps]=useState(8);
+  const[durs,setDurs]=useState([null]);
+
+  const[exporting,setExporting]=useState(false);
+  const[exportPct,setExportPct]=useState(0);
+  const[toast,setToast]=useState(null);
+
+  const drawC=useRef(null),playC=useRef(null);
+  const drawing=useRef(false),lastP=useRef(null),playTimer=useRef(null);
+
+  const flash=useCallback((msg,ok=true)=>{setToast({msg,ok});setTimeout(()=>setToast(null),2500);},[]);
+
+  const saveF=useCallback((idx)=>{
+    const c=drawC.current;if(!c)return;
+    const d=c.toDataURL();fd.current[idx]=d;thumbs.current[idx]=d;bump();
+  },[bump]);
+
+  const renderF=useCallback((idx,onion,w,h)=>{
+    const c=drawC.current;if(!c)return;
+    const ctx=c.getContext("2d");
+    ctx.clearRect(0,0,w,h);ctx.fillStyle=BG;ctx.fillRect(0,0,w,h);
+    const doOnion=()=>{
+      if(onion&&idx>0&&fd.current[idx-1]){
+        const p=new Image();
+        p.onload=()=>{ctx.globalAlpha=0.22;ctx.drawImage(p,0,0);ctx.globalAlpha=1;};
+        p.src=fd.current[idx-1];
+      }
+    };
+    const data=fd.current[idx];
+    if(data){
+      const img=new Image();
+      img.onload=()=>{ctx.clearRect(0,0,w,h);ctx.fillStyle=BG;ctx.fillRect(0,0,w,h);ctx.drawImage(img,0,0);doOnion();};
+      img.src=data;
+    }else doOnion();
+  },[]);
+
+  useEffect(()=>{if(!isPlaying)renderF(current,showOnion,W,H);},[current,showOnion,W,H,renderF,isPlaying]);
+
+  useEffect(()=>{
+    if(!isPlaying){clearTimeout(playTimer.current);return;}
+    let idx=0;
+    const step=()=>{
+      const c=playC.current;if(!c)return;
+      const ctx=c.getContext("2d");
+      ctx.clearRect(0,0,W,H);ctx.fillStyle=BG;ctx.fillRect(0,0,W,H);
+      const data=fd.current[idx];
+      const next=()=>{const dur=durs[idx]??Math.round(1000/fps);idx=(idx+1)%frameCount;playTimer.current=setTimeout(step,dur);};
+      if(data){const img=new Image();img.onload=()=>{ctx.drawImage(img,0,0);next();};img.onerror=next;img.src=data;}else next();
+    };
+    step();return()=>clearTimeout(playTimer.current);
+  },[isPlaying,fps,frameCount,durs,W,H]);
+
+  const applyRes=(nw,nh)=>{
+    const keys=Object.keys(fd.current);
+    if(!keys.length){setW(nw);setH(nh);setShowRes(false);return;}
+    let done=0;const nd={};
+    keys.forEach(k=>{
+      const src=fd.current[k];
+      if(!src){check();return;}
+      const off=document.createElement("canvas");off.width=nw;off.height=nh;
+      const ctx=off.getContext("2d");ctx.fillStyle=BG;ctx.fillRect(0,0,nw,nh);
+      const img=new Image();
+      img.onload=()=>{ctx.drawImage(img,0,0,nw,nh);nd[k]=off.toDataURL();check();};
+      img.onerror=check;img.src=src;
+    });
+    function check(){done++;if(done===keys.length){fd.current=nd;thumbs.current=nd;setW(nw);setH(nh);bump();setShowRes(false);}}
+  };
+
+  const gp=e=>{
+    const r=drawC.current.getBoundingClientRect(),sx=W/r.width,sy=H/r.height;
+    if(e.touches)return{x:(e.touches[0].clientX-r.left)*sx,y:(e.touches[0].clientY-r.top)*sy};
+    return{x:(e.clientX-r.left)*sx,y:(e.clientY-r.top)*sy};
+  };
+  const startDraw=e=>{
+    if(isPlaying)return;e.preventDefault();
+    const pos=gp(e);
+    if(tool==="fill"){floodFill(drawC.current.getContext("2d"),pos.x,pos.y,color,W,H);saveF(current);return;}
+    drawing.current=true;lastP.current=pos;
+    const ctx=drawC.current.getContext("2d");
+    ctx.beginPath();ctx.arc(pos.x,pos.y,size/2,0,Math.PI*2);
+    ctx.fillStyle=tool==="eraser"?BG:color;ctx.fill();
+  };
+  const onDraw=e=>{
+    if(!drawing.current||isPlaying)return;e.preventDefault();
+    const pos=gp(e),ctx=drawC.current.getContext("2d");
+    ctx.beginPath();ctx.moveTo(lastP.current.x,lastP.current.y);ctx.lineTo(pos.x,pos.y);
+    ctx.strokeStyle=tool==="eraser"?BG:color;ctx.lineWidth=size;ctx.lineCap="round";ctx.lineJoin="round";ctx.stroke();
+    lastP.current=pos;
+  };
+  const endDraw=()=>{if(!drawing.current)return;drawing.current=false;saveF(current);};
+
+  const switchF=idx=>{saveF(current);setCurrent(idx);};
+  const addFrame=()=>{
+    if(frameCount>=MAX_FRAMES)return;saveF(current);
+    const ni=current+1,nfd={},nth={};
+    for(let k=0;k<frameCount;k++){const ki=k>=ni?k+1:k;if(fd.current[k]){nfd[ki]=fd.current[k];nth[ki]=thumbs.current[k];}}
+    fd.current=nfd;thumbs.current=nth;
+    setDurs(d=>{const n=[...d];n.splice(ni,0,null);return n;});
+    setFrameCount(fc=>fc+1);setCurrent(ni);
+  };
+  const deleteFrame=()=>{
+    if(frameCount<=1)return;const di=current,nfd={},nth={};
+    for(let k=0;k<frameCount;k++){if(k===di)continue;const ki=k>di?k-1:k;if(fd.current[k]){nfd[ki]=fd.current[k];nth[ki]=thumbs.current[k];}}
+    fd.current=nfd;thumbs.current=nth;
+    setDurs(d=>{const n=[...d];n.splice(di,1);return n;});
+    setFrameCount(fc=>fc-1);
+    const nc=Math.min(di,frameCount-2);setCurrent(nc);
+    setTimeout(()=>renderF(nc,showOnion,W,H),30);
+  };
+  const clearFrame=()=>{
+    const ctx=drawC.current.getContext("2d");ctx.clearRect(0,0,W,H);ctx.fillStyle=BG;ctx.fillRect(0,0,W,H);
+    delete fd.current[current];delete thumbs.current[current];bump();
+  };
+
+  const saveLocal=()=>{
+    saveF(current);
+    try{
+      localStorage.setItem(STORAGE_KEY,JSON.stringify({frameCount,fps,W,H,durs,frames:Object.fromEntries(Array.from({length:frameCount},(_,i)=>[i,fd.current[i]??null]))}));
+      flash("保存しました");
+    }catch{flash("保存失敗",false);}
+  };
+  const loadLocal=()=>{
+    const raw=localStorage.getItem(STORAGE_KEY);
+    if(!raw){flash("データなし",false);return;}
+    try{
+      const p=JSON.parse(raw),fc=p.frameCount||1;
+      fd.current={};thumbs.current={};
+      for(let i=0;i<fc;i++)if(p.frames[i]){fd.current[i]=p.frames[i];thumbs.current[i]=p.frames[i];}
+      setFrameCount(fc);setDurs(p.durs||Array(fc).fill(null));
+      if(p.fps)setFps(p.fps);if(p.W&&p.H){setW(p.W);setH(p.H);}
+      setCurrent(0);bump();flash("読み込みました");
+    }catch{flash("読み込み失敗",false);}
+  };
+  const exportJSON=()=>{
+    saveF(current);
+    const p={frameCount,fps,W,H,durs,frames:Object.fromEntries(Array.from({length:frameCount},(_,i)=>[i,fd.current[i]??null]))};
+    const url=URL.createObjectURL(new Blob([JSON.stringify(p)],{type:"application/json"}));
+    const a=document.createElement("a");a.href=url;a.download="flipbook.json";a.click();URL.revokeObjectURL(url);
+  };
+  const importJSON=file=>{
+    const r=new FileReader();r.onload=e=>{
+      try{
+        const p=JSON.parse(e.target.result),fc=p.frameCount||1;
+        fd.current={};thumbs.current={};
+        for(let i=0;i<fc;i++)if(p.frames[i]){fd.current[i]=p.frames[i];thumbs.current[i]=p.frames[i];}
+        setFrameCount(fc);setDurs(p.durs||Array(fc).fill(null));
+        if(p.fps)setFps(p.fps);if(p.W&&p.H){setW(p.W);setH(p.H);}
+        setCurrent(0);bump();flash("インポートしました");
+      }catch{flash("失敗",false);}
+    };r.readAsText(file);
+  };
+  const handleExport=async()=>{
+    saveF(current);setExporting(true);setExportPct(0);
+    await doExport(fd.current,frameCount,durs,fps,W,H,p=>setExportPct(p),()=>{setExporting(false);flash("書き出し完了");},e=>{setExporting(false);flash("エラー: "+e,false);});
+  };
+
+  const defDur=Math.round(1000/fps);
+  const TOOLS=[{id:"pen",label:"✏"},{id:"eraser",label:"⌫"},{id:"fill",label:"◈"}];
+
+  return(
+    <div style={{minHeight:"100vh",background:T.bg,fontFamily:T.font,color:T.text,padding:12,boxSizing:"border-box",display:"flex",flexDirection:"column",gap:8}}>
+
+      {/* Toast */}
+      {toast&&(
+        <div style={{position:"fixed",top:12,left:"50%",transform:"translateX(-50%)",
+          background:toast.ok?"#f0fdf4":"#fef2f2",
+          color:toast.ok?"#15803d":"#dc2626",
+          padding:"6px 14px",borderRadius:20,fontSize:12,
+          border:`1px solid ${toast.ok?"#bbf7d0":"#fecaca"}`,
+          zIndex:9999,pointerEvents:"none",whiteSpace:"nowrap"}}>
+          {toast.msg}
+        </div>
+      )}
+
+      {/* Toolbar */}
+      <Panel style={{display:"flex",flexWrap:"wrap",gap:6,alignItems:"center",padding:"6px 10px"}}>
+        <TextBtn onClick={saveLocal}>💾 保存</TextBtn>
+        <TextBtn onClick={loadLocal}>📂 読込</TextBtn>
+        <TextBtn onClick={exportJSON}>↓ JSON</TextBtn>
+        <label style={{display:"flex",alignItems:"center",height:30,padding:"0 10px",
+          background:T.panel,border:`1px solid ${T.border}`,borderRadius:6,
+          cursor:"pointer",fontSize:12,color:T.text,gap:4}}>
+          ↑ インポート
+          <input type="file" accept=".json" style={{display:"none"}}
+            onChange={e=>{if(e.target.files[0])importJSON(e.target.files[0]);e.target.value="";}}/>
+        </label>
+
+        <div style={{width:1,height:18,background:T.border,margin:"0 2px"}}/>
+
+        {/* Resolution picker */}
+        <div style={{position:"relative"}}>
+          <TextBtn onClick={()=>setShowRes(p=>!p)}>⊡ {W}×{H}</TextBtn>
+          {showRes&&(
+            <div style={{position:"absolute",top:"calc(100% + 4px)",left:0,zIndex:200,
+              background:T.panel,border:`1px solid ${T.border}`,borderRadius:8,padding:6,
+              minWidth:160,boxShadow:"0 4px 12px rgba(0,0,0,0.1)"}}>
+              {PRESETS.map(p=>(
+                <div key={p.label} onClick={()=>applyRes(p.w,p.h)} style={{
+                  padding:"6px 10px",borderRadius:6,cursor:"pointer",fontSize:12,
+                  background:W===p.w&&H===p.h?"#eff6ff":"transparent",
+                  color:W===p.w&&H===p.h?T.blue:T.text}}>
+                  {p.label}
+                </div>
+              ))}
+              <div style={{borderTop:`1px solid ${T.border}`,marginTop:4,paddingTop:6,display:"flex",gap:4,alignItems:"center"}}>
+                <input type="number" value={customW} onChange={e=>setCustomW(Number(e.target.value))}
+                  style={{width:50,padding:"3px 4px",fontSize:11,border:`1px solid ${T.border}`,borderRadius:4}}/>
+                <span style={{color:T.hint,fontSize:11}}>×</span>
+                <input type="number" value={customH} onChange={e=>setCustomH(Number(e.target.value))}
+                  style={{width:50,padding:"3px 4px",fontSize:11,border:`1px solid ${T.border}`,borderRadius:4}}/>
+                <TextBtn onClick={()=>applyRes(customW,customH)}>適用</TextBtn>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div style={{flex:1}}/>
+        <TextBtn onClick={handleExport} primary disabled={exporting}>
+          {exporting?`${exportPct}%`:"▶ 書き出し"}
+        </TextBtn>
+      </Panel>
+
+      {/* Body */}
+      <div style={{display:"flex",gap:8,flex:1,minHeight:0,flexWrap:"wrap",justifyContent:"center"}}>
+
+        {/* Left: tools */}
+        <div style={{display:"flex",flexDirection:"column",gap:8,width:48}}>
+
+          {/* Tool selector */}
+          <Panel style={{display:"flex",flexDirection:"column",gap:4,padding:6,alignItems:"center"}}>
+            {TOOLS.map(t=>(
+              <IcoBtn key={t.id} active={tool===t.id} onClick={()=>setTool(t.id)} title={t.id}
+                style={{fontSize:15,width:34,height:34}}>
+                {t.label}
+              </IcoBtn>
+            ))}
+          </Panel>
+
+          {/* Brush size */}
+          <Panel style={{display:"flex",flexDirection:"column",gap:5,padding:6,alignItems:"center"}}>
+            <span style={{fontSize:10,color:T.hint}}>{size}px</span>
+            {[2,4,8,16].map(s=>(
+              <div key={s} onClick={()=>setSize(s)} style={{
+                width:34,height:18,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",
+                borderRadius:5,background:size===s?"#eff6ff":"transparent",
+                border:`1px solid ${size===s?T.blue:"transparent"}`,
+              }}>
+                <div style={{width:Math.min(s*2,28),height:Math.min(s*2,14),borderRadius:99,
+                  background:size===s?T.blue:T.borderAct,minWidth:3,minHeight:3}}/>
+              </div>
+            ))}
+          </Panel>
+
+          {/* Color */}
+          <Panel style={{padding:6,display:"flex",flexDirection:"column",gap:5,alignItems:"center"}}>
+            <div style={{width:34,height:26,borderRadius:5,background:color,
+              border:`1px solid ${T.border}`,cursor:"pointer",position:"relative",overflow:"hidden"}}>
+              <input type="color" value={color} onChange={e=>setColor(e.target.value)}
+                style={{position:"absolute",inset:0,opacity:0,width:"100%",height:"100%",cursor:"pointer"}}/>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:3}}>
+              {SWATCHES.map(c=>(
+                <div key={c} onClick={()=>setColor(c)} style={{
+                  width:12,height:12,borderRadius:3,background:c,cursor:"pointer",
+                  outline:color===c?`2px solid ${T.blue}`:"none",outlineOffset:1,
+                  border:`1px solid ${T.border}`,
+                }}/>
+              ))}
+            </div>
+          </Panel>
+        </div>
+
+        {/* Center: canvas area */}
+        <div style={{display:"flex",flexDirection:"column",gap:8,flex:1,minWidth:260,maxWidth:560}}>
+
+          {/* Status */}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"0 2px"}}>
+            <span style={{fontSize:12,color:T.muted}}>フレーム {current+1} / {frameCount}</span>
+            <label style={{display:"flex",alignItems:"center",gap:5,cursor:"pointer",fontSize:12,color:T.muted}}>
+              <input type="checkbox" checked={showOnion} onChange={e=>setShowOnion(e.target.checked)}/>
+              オニオン
+            </label>
+          </div>
+
+          {/* Canvas */}
+          <div style={{position:"relative",borderRadius:8,overflow:"hidden",
+            border:`1px solid ${T.border}`,background:BG,aspectRatio:`${W}/${H}`,
+            boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+            <canvas ref={drawC} width={W} height={H}
+              style={{display:isPlaying?"none":"block",width:"100%",height:"100%",
+                touchAction:"none",cursor:"crosshair"}}
+              onMouseDown={startDraw} onMouseMove={onDraw} onMouseUp={endDraw} onMouseLeave={endDraw}
+              onTouchStart={startDraw} onTouchMove={onDraw} onTouchEnd={endDraw}/>
+            <canvas ref={playC} width={W} height={H}
+              style={{display:isPlaying?"block":"none",width:"100%",height:"100%",
+                position:"absolute",top:0,left:0}}/>
+          </div>
+
+          {/* Per-frame duration */}
+          <Panel style={{padding:"8px 10px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+              <span style={{fontSize:11,color:T.muted,minWidth:60}}>表示時間</span>
+              <input type="range" min={16} max={2000} step={8}
+                value={durs[current]??defDur}
+                onChange={e=>setDurs(d=>{const n=[...d];n[current]=parseInt(e.target.value);return n;})}
+                style={{flex:1,minWidth:80}}/>
+              <input type="number" min={16} max={5000} step={8}
+                value={durs[current]??defDur}
+                onChange={e=>setDurs(d=>{const n=[...d];n[current]=Math.max(16,parseInt(e.target.value)||defDur);return n;})}
+                style={{width:58,padding:"3px 6px",fontSize:12,border:`1px solid ${T.border}`,borderRadius:4,textAlign:"right"}}/>
+              <span style={{fontSize:11,color:T.hint}}>ms</span>
+              <button onClick={()=>setDurs(d=>{const n=[...d];n[current]=null;return n;})}
+                style={{fontSize:11,padding:"2px 7px",background:"transparent",
+                  border:`1px solid ${T.border}`,borderRadius:4,cursor:"pointer",color:T.muted}}>
+                ↺
+              </button>
+            </div>
+          </Panel>
+
+          {/* Frame actions */}
+          <div style={{display:"flex",gap:6}}>
+            <TextBtn onClick={addFrame} style={{flex:1}}>＋ 追加</TextBtn>
+            <TextBtn onClick={deleteFrame} danger style={{flex:1}}>✕ 削除</TextBtn>
+            <TextBtn onClick={clearFrame} style={{flex:1}}>⌫ クリア</TextBtn>
+          </div>
+
+          {/* Playback */}
+          <Panel style={{display:"flex",gap:8,alignItems:"center",padding:"8px 10px"}}>
+            <button onClick={()=>setIsPlaying(p=>!p)} style={{
+              display:"flex",alignItems:"center",gap:6,flex:1,padding:"7px 12px",
+              background:isPlaying?"#fef2f2":"#eff6ff",
+              border:`1px solid ${isPlaying?T.red:T.blue}`,
+              borderRadius:6,cursor:"pointer",
+              color:isPlaying?T.red:T.blue,fontSize:13,fontFamily:T.font,
+            }}>
+              {isPlaying?"⏹ 停止":"▶ 再生"}
+            </button>
+            <div style={{display:"flex",alignItems:"center",gap:6,minWidth:120}}>
+              <span style={{fontSize:11,color:T.hint}}>FPS</span>
+              <input type="range" min={1} max={24} value={fps}
+                onChange={e=>setFps(Number(e.target.value))} style={{flex:1}}/>
+              <span style={{fontSize:12,color:T.muted,minWidth:18,textAlign:"right"}}>{fps}</span>
+            </div>
+          </Panel>
+
+          {/* Frame navigation */}
+          <div style={{display:"flex",gap:6,alignItems:"center",justifyContent:"center"}}>
+            <IcoBtn onClick={()=>current>0&&switchF(current-1)} title="前">◀</IcoBtn>
+            <span style={{fontSize:11,color:T.hint,minWidth:70,textAlign:"center"}}>{frameCount} frames</span>
+            <IcoBtn onClick={()=>current<frameCount-1&&switchF(current+1)} title="次">▶</IcoBtn>
+          </div>
+        </div>
+
+        {/* Filmstrip */}
+        <Panel style={{width:88,padding:6,display:"flex",flexDirection:"column",gap:6}}>
+          <span style={{fontSize:10,color:T.hint,textAlign:"center",letterSpacing:"0.05em"}}>FRAMES</span>
+          <div style={{display:"flex",flexDirection:"column",gap:4,overflowY:"auto",flex:1,maxHeight:480}}>
+            {Array.from({length:frameCount},(_,i)=>(
+              <div key={`${i}-${thumbVer}`} onClick={()=>switchF(i)} style={{
+                position:"relative",borderRadius:4,overflow:"hidden",cursor:"pointer",
+                border:`1.5px solid ${current===i?T.blue:T.border}`,
+                background:BG,aspectRatio:`${W}/${H}`,flexShrink:0,
+                boxShadow:current===i?"0 0 0 2px #bfdbfe":"none",
+              }}>
+                {thumbs.current[i]
+                  ?<img src={thumbs.current[i]} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt=""/>
+                  :<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:T.hint,fontSize:9}}>—</div>
+                }
+                <div style={{position:"absolute",bottom:1,right:2,fontSize:8,
+                  color:current===i?T.blue:T.hint,lineHeight:1,fontWeight:500}}>{i+1}</div>
+                {durs[i]!=null&&<div style={{position:"absolute",top:1,left:2,fontSize:7,
+                  color:"#d97706",lineHeight:1}}>{durs[i]}</div>}
+              </div>
+            ))}
+          </div>
+        </Panel>
+
+      </div>
+    </div>
+  );
+}
