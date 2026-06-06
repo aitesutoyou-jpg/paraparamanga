@@ -14,19 +14,29 @@
       font-family: -apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Segoe UI', sans-serif;
       color: #1a1a18;
       -webkit-tap-highlight-color: transparent;
-      user-select: none;
-      -webkit-user-select: none;
+      user-select: none; -webkit-user-select: none;
     }
     input[type=range] { cursor: pointer; accent-color: #2563eb; height: 4px; }
     input[type=number] {
-      border: 1px solid #ddd; border-radius: 6px; padding: 6px 8px;
-      font-size: 13px; background: #fff; color: #1a1a18;
+      border: 1px solid #ddd; border-radius: 8px; padding: 8px 10px;
+      font-size: 14px; background: #fff; color: #1a1a18;
       font-family: inherit; -webkit-appearance: none;
     }
     input[type=color] { border: none; padding: 0; cursor: pointer; background: none; }
-    button { font-family: inherit; cursor: pointer; -webkit-appearance: none; }
+    button { font-family: inherit; cursor: pointer; -webkit-appearance: none; border: none; background: none; }
     ::-webkit-scrollbar { width: 3px; }
     ::-webkit-scrollbar-thumb { background: #ddd; border-radius: 2px; }
+    .popup-backdrop {
+      position: fixed; inset: 0; z-index: 200;
+    }
+    .popup {
+      position: absolute; z-index: 201;
+      background: #fff;
+      border: 1px solid #e0e0dd;
+      border-radius: 16px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.15);
+      padding: 16px;
+    }
   </style>
 </head>
 <body>
@@ -35,15 +45,12 @@
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script type="text/babel">
-const { useState, useRef, useEffect, useCallback, useMemo } = React;
+const { useState, useRef, useEffect, useCallback } = React;
 
 const MAX_FRAMES = 60;
-const STORAGE_KEY = "flipbook_v5";
+const MAX_CUSTOM_COLORS = 10;
 const BG = "#ffffff";
-
-// iPad Pro 11" / Air 5 / iPad 10th: 1620×2160 (portrait) → CSS ~810×1080 at 2x
-// We treat as landscape: width=1080, height=810 CSS px
-// Default canvas = 16:12 ratio to match iPad drawing area
+const CUSTOM_COLORS_KEY = "flipbook_custom_colors";
 
 const PRESETS = [
   { label: "1080×810",  w: 1080, h: 810  },
@@ -52,39 +59,34 @@ const PRESETS = [
   { label: "400×300",   w: 400,  h: 300  },
 ];
 
-const SWATCHES = [
-  "#000000","#1e293b","#64748b","#cbd5e1","#ffffff",
-  "#ef4444","#f97316","#eab308","#22c55e","#3b82f6",
-  "#a855f7","#ec4899","#06b6d4","#84cc16","#f59e0b",
+const PALETTE = [
+  "#000000","#1e293b","#475569","#94a3b8","#e2e8f0","#ffffff",
+  "#ef4444","#f97316","#f59e0b","#eab308","#84cc16","#22c55e",
+  "#06b6d4","#3b82f6","#6366f1","#a855f7","#ec4899","#f43f5e",
 ];
 
 const TOOLS = [
-  { id:"pen",      label:"✏",  title:"ペン",       shape:false },
-  { id:"brush",    label:"◎",  title:"ブラシ",     shape:false },
-  { id:"eraser",   label:"⌫",  title:"消しゴム",   shape:false },
-  { id:"fill",     label:"◈",  title:"塗りつぶし", shape:false },
-  { id:"line",     label:"╱",  title:"直線",       shape:true  },
-  { id:"rect",     label:"□",  title:"四角（枠）", shape:true  },
-  { id:"rectf",    label:"■",  title:"四角（塗）", shape:true  },
-  { id:"ellipse",  label:"◯",  title:"丸（枠）",   shape:true  },
-  { id:"ellipsef", label:"●",  title:"丸（塗）",   shape:true  },
+  { id:"pen",       label:"✏",  title:"ペン",       shape:false },
+  { id:"brush",     label:"◎",  title:"ブラシ",     shape:false },
+  { id:"eraser",    label:"⌫",  title:"消しゴム",   shape:false },
+  { id:"fill",      label:"◈",  title:"塗りつぶし", shape:false },
+  { id:"line",      label:"╱",  title:"直線",       shape:true  },
+  { id:"rect",      label:"□",  title:"四角（枠）", shape:true  },
+  { id:"rectf",     label:"■",  title:"四角（塗）", shape:true  },
+  { id:"ellipse",   label:"◯",  title:"丸（枠）",   shape:true  },
+  { id:"ellipsef",  label:"●",  title:"丸（塗）",   shape:true  },
 ];
 
-const SIZES = [2, 4, 8, 16, 28];
+const SIZES = [1, 2, 4, 6, 8, 12, 16, 24, 32];
 
 const C = {
-  bg:      "#f2f2f0",
-  panel:   "#ffffff",
-  border:  "#e0e0dd",
-  muted:   "#8a8a86",
-  hint:    "#b8b8b4",
-  blue:    "#2563eb",
-  blueBg:  "#eff6ff",
-  red:     "#dc2626",
-  redBg:   "#fef2f2",
-  text:    "#1a1a18",
+  bg:"#f2f2f0", panel:"#ffffff", border:"#e0e0dd",
+  muted:"#8a8a86", hint:"#b8b8b4",
+  blue:"#2563eb", blueBg:"#eff6ff",
+  red:"#dc2626", redBg:"#fef2f2", text:"#1a1a18",
 };
 
+// ── helpers ───────────────────────────────────────────────────────
 function hexToRgb(h){return[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];}
 
 function floodFill(ctx,x,y,fc,W,H){
@@ -94,10 +96,8 @@ function floodFill(ctx,x,y,fc,W,H){
   if(tr===fr&&tg===fg&&tb===fb)return;
   const s=[[x,y]];
   while(s.length){
-    const[cx,cy]=s.pop();
-    if(cx<0||cy<0||cx>=W||cy>=H)continue;
-    const i=(cy*W+cx)*4;
-    if(d[i]!==tr||d[i+1]!==tg||d[i+2]!==tb||d[i+3]!==ta)continue;
+    const[cx,cy]=s.pop();if(cx<0||cy<0||cx>=W||cy>=H)continue;
+    const i=(cy*W+cx)*4;if(d[i]!==tr||d[i+1]!==tg||d[i+2]!==tb||d[i+3]!==ta)continue;
     d[i]=fr;d[i+1]=fg;d[i+2]=fb;d[i+3]=255;
     s.push([cx+1,cy],[cx-1,cy],[cx,cy+1],[cx,cy-1]);
   }
@@ -105,8 +105,7 @@ function floodFill(ctx,x,y,fc,W,H){
 }
 
 function drawShape(ctx,tool,sx,sy,ex,ey,color,sz){
-  ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=sz;
-  ctx.lineCap="round";ctx.lineJoin="round";
+  ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=sz;ctx.lineCap="round";ctx.lineJoin="round";
   const x=Math.min(sx,ex),y=Math.min(sy,ey),w=Math.abs(ex-sx),h=Math.abs(ey-sy);
   ctx.beginPath();
   if(tool==="line"){ctx.moveTo(sx,sy);ctx.lineTo(ex,ey);ctx.stroke();}
@@ -148,15 +147,114 @@ async function doExport(fd,fc,durs,fps,W,H,onP,onDone,onErr){
   }catch(e){onErr(e.message);}
 }
 
-// ── UI atoms ─────────────────────────────────────────────────────
-function ToolBtn({label,active,onClick,title}){
+// ── Size popup ────────────────────────────────────────────────────
+function SizePopup({size, onSelect, onClose, anchorRef}){
+  const pos = anchorRef.current?.getBoundingClientRect();
+  return <>
+    <div className="popup-backdrop" onPointerDown={onClose}/>
+    <div className="popup" style={{left:(pos?.right??80)+10, top:pos?.top??100, width:180}}>
+      <div style={{fontSize:12,color:C.hint,marginBottom:10,letterSpacing:"0.06em"}}>ブラシサイズ</div>
+      {/* Slider */}
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
+        <input type="range" min={1} max={60} value={size}
+          onChange={e=>onSelect(Number(e.target.value))}
+          style={{flex:1,accentColor:C.blue}}/>
+        <span style={{fontSize:14,color:C.text,minWidth:32,textAlign:"right",fontVariantNumeric:"tabular-nums"}}>{size}px</span>
+      </div>
+      {/* Quick presets */}
+      <div style={{display:"flex",flexDirection:"column",gap:4}}>
+        {SIZES.map(s=>(
+          <div key={s} onClick={()=>{onSelect(s);onClose();}} style={{
+            display:"flex",alignItems:"center",gap:12,padding:"7px 10px",borderRadius:8,cursor:"pointer",
+            background:size===s?"#eff6ff":"transparent",
+            border:`1px solid ${size===s?C.blue:"transparent"}`,
+          }}>
+            <div style={{
+              flexShrink:0,borderRadius:99,background:size===s?C.blue:C.muted,
+              width:Math.min(s*2,80),height:Math.min(s,12),minWidth:2,minHeight:2,
+            }}/>
+            <span style={{fontSize:13,color:size===s?C.blue:C.muted,minWidth:36}}>{s}px</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  </>;
+}
+
+// ── Color popup ───────────────────────────────────────────────────
+function ColorPopup({color, customColors, onSelect, onAddCustom, onClose, anchorRef}){
+  const [draft, setDraft] = useState(color);
+  const pos = anchorRef.current?.getBoundingClientRect();
+
+  const commit = (c) => { onSelect(c); };
+  const addCustom = () => {
+    onAddCustom(draft);
+    onSelect(draft);
+  };
+
+  return <>
+    <div className="popup-backdrop" onPointerDown={onClose}/>
+    <div className="popup" style={{left:(pos?.right??80)+10, top:pos?.top??100, width:230}}>
+      <div style={{fontSize:12,color:C.hint,marginBottom:10,letterSpacing:"0.06em"}}>カラー</div>
+
+      {/* Palette grid */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:6,marginBottom:12}}>
+        {PALETTE.map(c=>(
+          <div key={c} onClick={()=>commit(c)} style={{
+            paddingBottom:"100%",borderRadius:7,background:c,cursor:"pointer",position:"relative",
+            outline:color===c?`3px solid ${C.blue}`:"none",outlineOffset:2,
+            border:`1px solid rgba(0,0,0,0.08)`,
+          }}/>
+        ))}
+      </div>
+
+      {/* Custom colors */}
+      {customColors.length>0&&<>
+        <div style={{fontSize:11,color:C.hint,marginBottom:6}}>カスタム</div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:12}}>
+          {customColors.map((c,i)=>(
+            <div key={i} onClick={()=>commit(c)} style={{
+              width:32,height:32,borderRadius:7,background:c,cursor:"pointer",flexShrink:0,
+              outline:color===c?`3px solid ${C.blue}`:"none",outlineOffset:2,
+              border:`1px solid rgba(0,0,0,0.08)`,
+            }}/>
+          ))}
+        </div>
+      </>}
+
+      {/* Custom picker */}
+      <div style={{borderTop:`1px solid ${C.border}`,paddingTop:12}}>
+        <div style={{fontSize:11,color:C.hint,marginBottom:8}}>カスタムカラー</div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          {/* Big color swatch that opens native picker */}
+          <div style={{position:"relative",width:44,height:44,borderRadius:8,
+            background:draft,border:`1px solid ${C.border}`,flexShrink:0,overflow:"hidden"}}>
+            <input type="color" value={draft} onChange={e=>setDraft(e.target.value)}
+              style={{position:"absolute",inset:0,opacity:0,width:"100%",height:"100%",cursor:"pointer"}}/>
+          </div>
+          <input
+            type="text" value={draft}
+            onChange={e=>{if(/^#[0-9a-fA-F]{0,6}$/.test(e.target.value))setDraft(e.target.value);}}
+            style={{flex:1,fontFamily:"monospace",fontSize:13,letterSpacing:"0.05em"}}
+          />
+          <button onClick={addCustom} style={{
+            height:44,padding:"0 14px",background:C.blue,borderRadius:8,
+            color:"#fff",fontSize:13,flexShrink:0,
+          }}>追加</button>
+        </div>
+      </div>
+    </div>
+  </>;
+}
+
+// ── Shared button primitives ──────────────────────────────────────
+function ToolBtn({label,active,onClick,title,btnRef}){
   return(
-    <button onClick={onClick} title={title} style={{
+    <button ref={btnRef} onClick={onClick} title={title} style={{
       width:52,height:52,display:"flex",alignItems:"center",justifyContent:"center",
       background:active?C.blueBg:"transparent",
       border:`1.5px solid ${active?C.blue:C.border}`,
-      borderRadius:10,color:active?C.blue:C.muted,
-      fontSize:18,flexShrink:0,transition:"background 0.1s,border-color 0.1s",
+      borderRadius:10,color:active?C.blue:C.muted,fontSize:18,flexShrink:0,
     }}>{label}</button>
   );
 }
@@ -174,16 +272,7 @@ function Btn({children,onClick,primary,danger,disabled,style={}}){
   );
 }
 
-function Panel({children,style={}}){
-  return(
-    <div style={{background:C.panel,border:`1px solid ${C.border}`,borderRadius:12,
-      padding:10,...style}}>
-      {children}
-    </div>
-  );
-}
-
-// ── Main App ─────────────────────────────────────────────────────
+// ── Main App ──────────────────────────────────────────────────────
 function App(){
   const dpr = window.devicePixelRatio || 1;
 
@@ -204,6 +293,9 @@ function App(){
   const[color,setColor]=useState("#000000");
   const[size,setSize]=useState(4);
   const[showOnion,setShowOnion]=useState(true);
+  const[customColors,setCustomColors]=useState(()=>{
+    try{return JSON.parse(localStorage.getItem(CUSTOM_COLORS_KEY))||[];}catch{return[];}
+  });
 
   const[isPlaying,setIsPlaying]=useState(false);
   const[fps,setFps]=useState(8);
@@ -213,9 +305,10 @@ function App(){
   const[exportPct,setExportPct]=useState(0);
   const[toast,setToast]=useState(null);
 
-  // Panels
-  const[showSizePanel,setShowSizePanel]=useState(false);
-  const[showColorPanel,setShowColorPanel]=useState(false);
+  // popup state
+  const[popup,setPopup]=useState(null); // null | "size" | "color" | "res"
+  const sizeBtnRef=useRef(null);
+  const colorBtnRef=useRef(null);
 
   const drawC=useRef(null),playC=useRef(null),onionC=useRef(null);
   const drawing=useRef(false),lastP=useRef(null),shapeStart=useRef(null),snapshotBefore=useRef(null);
@@ -223,7 +316,15 @@ function App(){
 
   const flash=useCallback((msg,ok=true)=>{setToast({msg,ok});setTimeout(()=>setToast(null),2200);},[]);
 
-  // Save: composite draw canvas onto white offscreen
+  const addCustomColor = useCallback((c) => {
+    setCustomColors(prev => {
+      const next = [c, ...prev.filter(x=>x!==c)].slice(0, MAX_CUSTOM_COLORS);
+      localStorage.setItem(CUSTOM_COLORS_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  // ── Canvas ops ────────────────────────────────────────────────
   const saveF=useCallback((idx)=>{
     const c=drawC.current;if(!c)return;
     const off=document.createElement("canvas");off.width=c.width;off.height=c.height;
@@ -232,7 +333,6 @@ function App(){
     const d=off.toDataURL();fd.current[idx]=d;thumbs.current[idx]=d;bump();
   },[bump]);
 
-  // Render frame content onto draw canvas (no onion)
   const renderF=useCallback((idx,w,h)=>{
     const c=drawC.current;if(!c)return;
     const ctx=c.getContext("2d");ctx.clearRect(0,0,w*dpr,h*dpr);
@@ -244,7 +344,6 @@ function App(){
     }
   },[dpr]);
 
-  // Render onion onto onion canvas
   const renderOnion=useCallback((idx,onion,w,h)=>{
     const c=onionC.current;if(!c)return;
     const ctx=c.getContext("2d");ctx.clearRect(0,0,w*dpr,h*dpr);
@@ -259,7 +358,6 @@ function App(){
     if(!isPlaying){renderF(current,W,H);renderOnion(current,showOnion,W,H);}
   },[current,showOnion,W,H,renderF,renderOnion,isPlaying]);
 
-  // Set up canvas physical size on mount and W/H change
   useEffect(()=>{
     [drawC,playC,onionC].forEach(ref=>{
       const c=ref.current;if(!c)return;
@@ -269,7 +367,6 @@ function App(){
     renderF(current,W,H);renderOnion(current,showOnion,W,H);
   },[W,H,dpr]);
 
-  // Playback
   useEffect(()=>{
     if(!isPlaying){clearTimeout(playTimer.current);return;}
     let idx=0;
@@ -298,30 +395,23 @@ function App(){
 
   const isShape=TOOLS.find(t=>t.id===tool)?.shape;
 
-  // Touch/mouse position helper — accounts for dpr via CSS size
   const gp=e=>{
-    const r=drawC.current.getBoundingClientRect();
-    const sx=W/r.width,sy=H/r.height;
+    const r=drawC.current.getBoundingClientRect(),sx=W/r.width,sy=H/r.height;
     const src=e.touches?e.touches[0]:e;
     return{x:(src.clientX-r.left)*sx,y:(src.clientY-r.top)*sy};
   };
 
   const startDraw=e=>{
-    if(isPlaying)return;e.preventDefault();
+    if(isPlaying)return;e.preventDefault();setPopup(null);
     const pos=gp(e);
     if(tool==="fill"){floodFill(drawC.current.getContext("2d"),pos.x,pos.y,color,W,H);saveF(current);return;}
     drawing.current=true;lastP.current=pos;
     if(isShape){shapeStart.current=pos;snapshotBefore.current=drawC.current.toDataURL();return;}
     const ctx=drawC.current.getContext("2d");
     if(tool==="brush"){
-      for(let i=0;i<16;i++){
-        const angle=Math.random()*Math.PI*2,r=Math.random()*size*2;
-        ctx.beginPath();ctx.arc(pos.x+Math.cos(angle)*r,pos.y+Math.sin(angle)*r,size*0.3,0,Math.PI*2);
-        ctx.fillStyle=color;ctx.fill();
-      }
+      for(let i=0;i<16;i++){const a=Math.random()*Math.PI*2,r=Math.random()*size*2;ctx.beginPath();ctx.arc(pos.x+Math.cos(a)*r,pos.y+Math.sin(a)*r,size*0.3,0,Math.PI*2);ctx.fillStyle=color;ctx.fill();}
     }else{
-      ctx.beginPath();ctx.arc(pos.x,pos.y,size/2,0,Math.PI*2);
-      ctx.fillStyle=tool==="eraser"?BG:color;ctx.fill();
+      ctx.beginPath();ctx.arc(pos.x,pos.y,size/2,0,Math.PI*2);ctx.fillStyle=tool==="eraser"?BG:color;ctx.fill();
     }
   };
 
@@ -334,16 +424,8 @@ function App(){
       img.src=snapshotBefore.current;return;
     }
     if(tool==="brush"){
-      const dx=pos.x-lastP.current.x,dy=pos.y-lastP.current.y,dist=Math.sqrt(dx*dx+dy*dy);
-      const steps=Math.max(1,Math.floor(dist/5));
-      for(let s=0;s<=steps;s++){
-        const tx=lastP.current.x+dx*(s/steps),ty=lastP.current.y+dy*(s/steps);
-        for(let i=0;i<8;i++){
-          const angle=Math.random()*Math.PI*2,r=Math.random()*size*2;
-          ctx.beginPath();ctx.arc(tx+Math.cos(angle)*r,ty+Math.sin(angle)*r,size*0.3,0,Math.PI*2);
-          ctx.fillStyle=color;ctx.fill();
-        }
-      }
+      const dx=pos.x-lastP.current.x,dy=pos.y-lastP.current.y,dist=Math.sqrt(dx*dx+dy*dy),steps=Math.max(1,Math.floor(dist/5));
+      for(let s=0;s<=steps;s++){const tx=lastP.current.x+dx*(s/steps),ty=lastP.current.y+dy*(s/steps);for(let i=0;i<8;i++){const a=Math.random()*Math.PI*2,r=Math.random()*size*2;ctx.beginPath();ctx.arc(tx+Math.cos(a)*r,ty+Math.sin(a)*r,size*0.3,0,Math.PI*2);ctx.fillStyle=color;ctx.fill();}}
     }else{
       ctx.beginPath();ctx.moveTo(lastP.current.x,lastP.current.y);ctx.lineTo(pos.x,pos.y);
       ctx.strokeStyle=tool==="eraser"?BG:color;ctx.lineWidth=size;ctx.lineCap="round";ctx.lineJoin="round";ctx.stroke();
@@ -363,17 +445,14 @@ function App(){
   };
 
   const switchF=idx=>{saveF(current);setCurrent(idx);};
-
   const addFrame=()=>{
-    if(frameCount>=MAX_FRAMES)return;
-    saveF(current);
+    if(frameCount>=MAX_FRAMES)return;saveF(current);
     const ni=current+1,nfd={},nth={};
     for(let k=0;k<frameCount;k++){const ki=k>=ni?k+1:k;if(fd.current[k]){nfd[ki]=fd.current[k];nth[ki]=thumbs.current[k];}}
     fd.current=nfd;thumbs.current=nth;
     setDurs(d=>{const n=[...d];n.splice(ni,0,null);return n;});
     setFrameCount(fc=>fc+1);setCurrent(ni);
   };
-
   const deleteFrame=()=>{
     if(frameCount<=1)return;const di=current,nfd={},nth={};
     for(let k=0;k<frameCount;k++){if(k===di)continue;const ki=k>di?k-1:k;if(fd.current[k]){nfd[ki]=fd.current[k];nth[ki]=thumbs.current[k];}}
@@ -383,46 +462,35 @@ function App(){
     const nc=Math.min(di,frameCount-2);setCurrent(nc);
     setTimeout(()=>renderF(nc,W,H),30);
   };
-
   const clearFrame=()=>{
     const ctx=drawC.current.getContext("2d");ctx.clearRect(0,0,W,H);
     delete fd.current[current];delete thumbs.current[current];bump();
   };
 
-  const saveLocal=()=>{
+  // ── Save / Load (JSON-unified) ────────────────────────────────
+  const saveJSON=()=>{
     saveF(current);
-    try{
-      localStorage.setItem(STORAGE_KEY,JSON.stringify({frameCount,fps,W,H,durs,frames:Object.fromEntries(Array.from({length:frameCount},(_,i)=>[i,fd.current[i]??null]))}));
-      flash("保存しました");
-    }catch{flash("保存失敗",false);}
-  };
-  const loadLocal=()=>{
-    const raw=localStorage.getItem(STORAGE_KEY);if(!raw){flash("データなし",false);return;}
-    try{
-      const p=JSON.parse(raw),fc=p.frameCount||1;fd.current={};thumbs.current={};
-      for(let i=0;i<fc;i++)if(p.frames[i]){fd.current[i]=p.frames[i];thumbs.current[i]=p.frames[i];}
-      setFrameCount(fc);setDurs(p.durs||Array(fc).fill(null));
-      if(p.fps)setFps(p.fps);if(p.W&&p.H){setW(p.W);setH(p.H);}
-      setCurrent(0);bump();flash("読み込みました");
-    }catch{flash("読み込み失敗",false);}
-  };
-  const exportJSON=()=>{
-    saveF(current);
-    const p={frameCount,fps,W,H,durs,frames:Object.fromEntries(Array.from({length:frameCount},(_,i)=>[i,fd.current[i]??null]))};
+    const p={version:2,frameCount,fps,W,H,durs,frames:Object.fromEntries(Array.from({length:frameCount},(_,i)=>[i,fd.current[i]??null]))};
     const url=URL.createObjectURL(new Blob([JSON.stringify(p)],{type:"application/json"}));
-    const a=document.createElement("a");a.href=url;a.download="flipbook.json";a.click();URL.revokeObjectURL(url);
+    const a=document.createElement("a");
+    a.href=url;a.download=`flipbook_${new Date().toISOString().slice(0,10)}.json`;
+    a.click();URL.revokeObjectURL(url);
+    flash("JSONに保存しました");
   };
-  const importJSON=file=>{
+
+  const loadJSON=file=>{
     const r=new FileReader();r.onload=e=>{
       try{
-        const p=JSON.parse(e.target.result),fc=p.frameCount||1;fd.current={};thumbs.current={};
+        const p=JSON.parse(e.target.result),fc=p.frameCount||1;
+        fd.current={};thumbs.current={};
         for(let i=0;i<fc;i++)if(p.frames[i]){fd.current[i]=p.frames[i];thumbs.current[i]=p.frames[i];}
         setFrameCount(fc);setDurs(p.durs||Array(fc).fill(null));
         if(p.fps)setFps(p.fps);if(p.W&&p.H){setW(p.W);setH(p.H);}
-        setCurrent(0);bump();flash("インポートしました");
-      }catch{flash("失敗",false);}
+        setCurrent(0);bump();flash("読み込みました");
+      }catch{flash("読み込み失敗",false);}
     };r.readAsText(file);
   };
+
   const handleExport=async()=>{
     saveF(current);setExporting(true);setExportPct(0);
     await doExport(fd.current,frameCount,durs,fps,W,H,p=>setExportPct(p),()=>{setExporting(false);flash("書き出し完了");},e=>{setExporting(false);flash("エラー: "+e,false);});
@@ -431,11 +499,8 @@ function App(){
   const defDur=Math.round(1000/fps);
   const cursorStyle=isShape?"crosshair":tool==="eraser"?"cell":"crosshair";
 
-  // Close popups on outside tap
-  const closePopups=()=>{setShowRes(false);setShowSizePanel(false);setShowColorPanel(false);};
-
   return(
-    <div style={{height:"100%",background:C.bg,display:"flex",flexDirection:"column",overflow:"hidden",padding:"env(safe-area-inset-top,0) env(safe-area-inset-right,0) env(safe-area-inset-bottom,0) env(safe-area-inset-left,0)"}}>
+    <div style={{height:"100%",background:C.bg,display:"flex",flexDirection:"column",overflow:"hidden"}}>
 
       {/* Toast */}
       {toast&&(
@@ -449,28 +514,41 @@ function App(){
         </div>
       )}
 
-      {/* ── Top toolbar ── */}
+      {/* Size popup */}
+      {popup==="size"&&(
+        <SizePopup size={size} onSelect={setSize} onClose={()=>setPopup(null)} anchorRef={sizeBtnRef}/>
+      )}
+
+      {/* Color popup */}
+      {popup==="color"&&(
+        <ColorPopup color={color} customColors={customColors}
+          onSelect={setColor}
+          onAddCustom={addCustomColor}
+          onClose={()=>setPopup(null)}
+          anchorRef={colorBtnRef}/>
+      )}
+
+      {/* ── Top bar ── */}
       <div style={{background:C.panel,borderBottom:`1px solid ${C.border}`,
         padding:"0 16px",height:56,display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
 
-        {/* File ops */}
-        <Btn onClick={saveLocal}>💾</Btn>
-        <Btn onClick={loadLocal}>📂</Btn>
-        <Btn onClick={exportJSON}>↓</Btn>
-        <label style={{display:"flex",alignItems:"center",justifyContent:"center",
-          height:44,width:44,background:C.panel,border:`1px solid ${C.border}`,
-          borderRadius:10,cursor:"pointer",fontSize:16,flexShrink:0}}>
-          ↑<input type="file" accept=".json" style={{display:"none"}}
-            onChange={e=>{if(e.target.files[0])importJSON(e.target.files[0]);e.target.value="";}}/>
+        {/* Save JSON */}
+        <Btn onClick={saveJSON}>💾 保存</Btn>
+
+        {/* Load JSON */}
+        <label style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+          height:44,padding:"0 14px",background:C.panel,border:`1px solid ${C.border}`,
+          borderRadius:10,cursor:"pointer",fontSize:14,color:C.text,whiteSpace:"nowrap",flexShrink:0}}>
+          📂 読込
+          <input type="file" accept=".json" style={{display:"none"}}
+            onChange={e=>{if(e.target.files[0])loadJSON(e.target.files[0]);e.target.value="";}}/>
         </label>
 
-        <div style={{width:1,height:24,background:C.border,margin:"0 4px"}}/>
+        <div style={{width:1,height:24,background:C.border,margin:"0 2px"}}/>
 
         {/* Resolution */}
         <div style={{position:"relative"}}>
-          <Btn onClick={()=>{setShowRes(p=>!p);setShowSizePanel(false);setShowColorPanel(false);}}>
-            ⊡ {W}×{H}
-          </Btn>
+          <Btn onClick={()=>setShowRes(p=>!p)}>⊡ {W}×{H}</Btn>
           {showRes&&(
             <div style={{position:"absolute",top:"calc(100% + 6px)",left:0,zIndex:300,
               background:C.panel,border:`1px solid ${C.border}`,borderRadius:14,padding:8,
@@ -483,21 +561,22 @@ function App(){
                   {p.label}
                 </div>
               ))}
-              <div style={{borderTop:`1px solid ${C.border}`,marginTop:6,paddingTop:8,display:"flex",gap:6,alignItems:"center",paddingLeft:4}}>
+              <div style={{borderTop:`1px solid ${C.border}`,marginTop:6,paddingTop:8,
+                display:"flex",gap:6,alignItems:"center",paddingLeft:4}}>
                 <input type="number" value={customW} onChange={e=>setCustomW(Number(e.target.value))} style={{width:60}}/>
                 <span style={{color:C.hint,fontSize:13}}>×</span>
                 <input type="number" value={customH} onChange={e=>setCustomH(Number(e.target.value))} style={{width:60}}/>
-                <Btn onClick={()=>applyRes(customW,customH)} style={{height:36,fontSize:13}}>適用</Btn>
+                <Btn onClick={()=>applyRes(customW,customH)} style={{height:36,fontSize:13,padding:"0 10px"}}>適用</Btn>
               </div>
             </div>
           )}
         </div>
 
-        {/* Onion toggle */}
+        {/* Onion */}
         <label style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer",
           padding:"0 12px",height:44,borderRadius:10,fontSize:14,color:C.muted,
           background:showOnion?"#eff6ff":C.panel,
-          border:`1px solid ${showOnion?C.blue:C.border}`}}>
+          border:`1px solid ${showOnion?C.blue:C.border}`,flexShrink:0}}>
           <input type="checkbox" checked={showOnion} onChange={e=>setShowOnion(e.target.checked)} style={{display:"none"}}/>
           オニオン
         </label>
@@ -512,112 +591,75 @@ function App(){
           borderRadius:10,color:isPlaying?C.red:C.blue,fontSize:15,fontWeight:600}}>
           {isPlaying?"⏹":"▶"}
         </button>
-        <div style={{display:"flex",alignItems:"center",gap:8,padding:"0 4px"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
           <span style={{fontSize:12,color:C.hint}}>FPS</span>
-          <input type="range" min={1} max={24} value={fps} onChange={e=>setFps(Number(e.target.value))}
-            style={{width:72,accentColor:C.blue}}/>
+          <input type="range" min={1} max={24} value={fps} onChange={e=>setFps(Number(e.target.value))} style={{width:72}}/>
           <span style={{fontSize:13,color:C.muted,minWidth:18}}>{fps}</span>
         </div>
 
         <div style={{width:1,height:24,background:C.border,margin:"0 4px"}}/>
-
         <Btn onClick={handleExport} primary disabled={exporting}>
           {exporting?`${exportPct}%`:"▶ 書き出し"}
         </Btn>
       </div>
 
       {/* ── Body ── */}
-      <div style={{flex:1,display:"flex",overflow:"hidden",gap:0}} onClick={closePopups}>
+      <div style={{flex:1,display:"flex",overflow:"hidden"}} onClick={()=>{setShowRes(false);}}>
 
-        {/* Left sidebar: tools */}
+        {/* Left sidebar */}
         <div style={{width:72,background:C.panel,borderRight:`1px solid ${C.border}`,
           display:"flex",flexDirection:"column",alignItems:"center",gap:6,padding:"10px 0",
-          overflowY:"auto",flexShrink:0}} onClick={e=>e.stopPropagation()}>
+          overflowY:"auto",flexShrink:0,zIndex:100}}>
 
-          {/* Tools */}
           {TOOLS.map(t=>(
             <ToolBtn key={t.id} label={t.label} active={tool===t.id}
-              onClick={()=>setTool(t.id)} title={t.title}/>
+              onClick={()=>{setTool(t.id);setPopup(null);}} title={t.title}/>
           ))}
 
           <div style={{width:40,height:1,background:C.border,margin:"4px 0"}}/>
 
-          {/* Size picker */}
-          <div style={{position:"relative"}}>
-            <button onClick={()=>{setShowSizePanel(p=>!p);setShowColorPanel(false);setShowRes(false);}} style={{
+          {/* Size button */}
+          <button ref={sizeBtnRef}
+            onClick={()=>setPopup(p=>p==="size"?null:"size")}
+            style={{
               width:52,height:52,display:"flex",flexDirection:"column",alignItems:"center",
-              justifyContent:"center",gap:3,background:showSizePanel?C.blueBg:"transparent",
-              border:`1.5px solid ${showSizePanel?C.blue:C.border}`,borderRadius:10,color:C.muted,
+              justifyContent:"center",gap:4,
+              background:popup==="size"?C.blueBg:"transparent",
+              border:`1.5px solid ${popup==="size"?C.blue:C.border}`,borderRadius:10,
             }}>
-              <div style={{width:Math.min(size*2,32),height:Math.min(size*2,12),borderRadius:99,
-                background:C.muted,minWidth:4,minHeight:4}}/>
-              <span style={{fontSize:10,color:C.hint}}>{size}px</span>
-            </button>
-            {showSizePanel&&(
-              <div style={{position:"absolute",left:"calc(100% + 8px)",top:0,zIndex:300,
-                background:C.panel,border:`1px solid ${C.border}`,borderRadius:14,
-                padding:10,boxShadow:"0 8px 24px rgba(0,0,0,0.12)",
-                display:"flex",flexDirection:"column",gap:6,minWidth:140}}>
-                {SIZES.map(s=>(
-                  <div key={s} onClick={()=>{setSize(s);setShowSizePanel(false);}} style={{
-                    display:"flex",alignItems:"center",gap:10,padding:"8px 10px",borderRadius:8,
-                    cursor:"pointer",background:size===s?"#eff6ff":"transparent",
-                    border:`1px solid ${size===s?C.blue:"transparent"}`,
-                  }}>
-                    <div style={{width:Math.min(s*2,40),height:Math.min(s,14),borderRadius:99,
-                      background:size===s?C.blue:C.muted,minWidth:4,minHeight:4}}/>
-                    <span style={{fontSize:13,color:size===s?C.blue:C.muted,minWidth:32}}>{s}px</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+            <div style={{
+              borderRadius:99,background:popup==="size"?C.blue:C.muted,
+              width:Math.min(size*1.6,34),height:Math.min(size*0.8,10),minWidth:3,minHeight:3,
+            }}/>
+            <span style={{fontSize:10,color:popup==="size"?C.blue:C.hint}}>{size}px</span>
+          </button>
 
-          {/* Color picker */}
-          <div style={{position:"relative"}}>
-            <button onClick={()=>{setShowColorPanel(p=>!p);setShowSizePanel(false);setShowRes(false);}} style={{
+          {/* Color button */}
+          <button ref={colorBtnRef}
+            onClick={()=>setPopup(p=>p==="color"?null:"color")}
+            style={{
               width:52,height:52,display:"flex",alignItems:"center",justifyContent:"center",
-              background:"transparent",border:`1.5px solid ${showColorPanel?C.blue:C.border}`,borderRadius:10,
+              background:"transparent",
+              border:`1.5px solid ${popup==="color"?C.blue:C.border}`,borderRadius:10,
             }}>
-              <div style={{width:32,height:32,borderRadius:8,background:color,border:`1px solid ${C.border}`}}/>
-            </button>
-            {showColorPanel&&(
-              <div style={{position:"absolute",left:"calc(100% + 8px)",top:0,zIndex:300,
-                background:C.panel,border:`1px solid ${C.border}`,borderRadius:14,padding:12,
-                boxShadow:"0 8px 24px rgba(0,0,0,0.12)",width:180}}>
-                <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:6,marginBottom:10}}>
-                  {SWATCHES.map(c=>(
-                    <div key={c} onClick={()=>setColor(c)} style={{
-                      width:"100%",paddingBottom:"100%",borderRadius:8,background:c,cursor:"pointer",
-                      outline:color===c?`3px solid ${C.blue}`:"none",outlineOffset:2,
-                      border:`1px solid ${C.border}`,
-                    }}/>
-                  ))}
-                </div>
-                <div style={{position:"relative",height:44,borderRadius:8,background:color,
-                  border:`1px solid ${C.border}`,overflow:"hidden"}}>
-                  <input type="color" value={color} onChange={e=>setColor(e.target.value)}
-                    style={{position:"absolute",inset:0,opacity:0,width:"100%",height:"100%",cursor:"pointer"}}/>
-                  <span style={{position:"absolute",inset:0,display:"flex",alignItems:"center",
-                    justifyContent:"center",fontSize:12,color:"#fff",pointerEvents:"none",
-                    textShadow:"0 1px 2px rgba(0,0,0,0.5)"}}>カスタム</span>
-                </div>
-              </div>
-            )}
-          </div>
+            <div style={{
+              width:34,height:34,borderRadius:8,background:color,
+              border:`1px solid rgba(0,0,0,0.1)`,
+              boxShadow:popup==="color"?`0 0 0 2px ${C.blue}`:"none",
+            }}/>
+          </button>
         </div>
 
-        {/* Center: canvas */}
+        {/* Center */}
         <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",padding:10,gap:8}}>
-
-          {/* Frame info + duration row */}
+          {/* Frame info row */}
           <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
             <span style={{fontSize:13,color:C.muted,minWidth:100}}>フレーム {current+1} / {frameCount}</span>
             <span style={{fontSize:12,color:C.hint}}>表示時間</span>
             <input type="range" min={16} max={2000} step={8}
               value={durs[current]??defDur}
               onChange={e=>setDurs(d=>{const n=[...d];n[current]=parseInt(e.target.value);return n;})}
-              style={{flex:1,accentColor:C.blue}}/>
+              style={{flex:1}}/>
             <input type="number" min={16} max={5000} step={8}
               value={durs[current]??defDur}
               onChange={e=>setDurs(d=>{const n=[...d];n[current]=Math.max(16,parseInt(e.target.value)||defDur);return n;})}
@@ -628,10 +670,9 @@ function App(){
                 borderRadius:8,fontSize:14,color:C.muted,flexShrink:0}}>↺</button>
           </div>
 
-          {/* Canvas container — fills remaining space */}
+          {/* Canvas */}
           <div style={{flex:1,position:"relative",borderRadius:12,overflow:"hidden",
-            border:`1px solid ${C.border}`,background:BG,
-            display:"flex",alignItems:"stretch"}}>
+            border:`1px solid ${C.border}`,background:BG,display:"flex",alignItems:"stretch"}}>
             <canvas ref={onionC} width={W*dpr} height={H*dpr}
               style={{position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none"}}/>
             <canvas ref={drawC} width={W*dpr} height={H*dpr}
@@ -643,7 +684,7 @@ function App(){
               style={{position:"absolute",inset:0,width:"100%",height:"100%",display:isPlaying?"block":"none"}}/>
           </div>
 
-          {/* Frame action buttons */}
+          {/* Frame actions */}
           <div style={{display:"flex",gap:8,flexShrink:0}}>
             <button onClick={()=>current>0&&switchF(current-1)}
               style={{height:44,width:44,background:C.panel,border:`1px solid ${C.border}`,borderRadius:10,fontSize:18,color:C.muted,flexShrink:0}}>◀</button>
@@ -655,7 +696,7 @@ function App(){
           </div>
         </div>
 
-        {/* Right sidebar: filmstrip */}
+        {/* Right: filmstrip */}
         <div style={{width:100,background:C.panel,borderLeft:`1px solid ${C.border}`,
           display:"flex",flexDirection:"column",padding:8,gap:6,flexShrink:0}}>
           <div style={{fontSize:11,color:C.hint,textAlign:"center",letterSpacing:"0.08em",flexShrink:0}}>FRAMES</div>
