@@ -53,10 +53,9 @@ const BG = "#ffffff";
 const CUSTOM_COLORS_KEY = "flipbook_custom_colors";
 
 const PRESETS = [
-  { label: "1080×810",  w: 1080, h: 810  },
-  { label: "1280×720",  w: 1280, h: 720  },
-  { label: "640×480",   w: 640,  h: 480  },
-  { label: "400×300",   w: 400,  h: 300  },
+  { label: "VGA  640×480",   w: 640,  h: 480  },
+  { label: "HD   1280×720",  w: 1280, h: 720  },
+  { label: "FHD  1920×1080", w: 1920, h: 1080 },
 ];
 
 const PALETTE = [
@@ -276,11 +275,11 @@ function Btn({children,onClick,primary,danger,disabled,style={}}){
 function App(){
   const dpr = window.devicePixelRatio || 1;
 
-  const[W,setW]=useState(1080);
-  const[H,setH]=useState(810);
+  const[W,setW]=useState(640);
+  const[H,setH]=useState(480);
   const[showRes,setShowRes]=useState(false);
-  const[customW,setCustomW]=useState(1080);
-  const[customH,setCustomH]=useState(810);
+  const[customW,setCustomW]=useState(640);
+  const[customH,setCustomH]=useState(480);
 
   const[frameCount,setFrameCount]=useState(1);
   const[current,setCurrent]=useState(0);
@@ -327,45 +326,46 @@ function App(){
   // ── Canvas ops ────────────────────────────────────────────────
   const saveF=useCallback((idx)=>{
     const c=drawC.current;if(!c)return;
-    const off=document.createElement("canvas");off.width=c.width;off.height=c.height;
-    const ctx=off.getContext("2d");ctx.fillStyle=BG;ctx.fillRect(0,0,off.width,off.height);
-    ctx.drawImage(c,0,0);
-    const d=off.toDataURL();fd.current[idx]=d;thumbs.current[idx]=d;bump();
+    // draw canvas already has white BG from renderF; just export directly
+    const d=c.toDataURL();fd.current[idx]=d;thumbs.current[idx]=d;bump();
   },[bump]);
 
   const renderF=useCallback((idx,w,h)=>{
     const c=drawC.current;if(!c)return;
-    const ctx=c.getContext("2d");ctx.clearRect(0,0,w*dpr,h*dpr);
+    const ctx=c.getContext("2d");
+    ctx.clearRect(0,0,w,h);
+    ctx.fillStyle=BG; ctx.fillRect(0,0,w,h);
     const data=fd.current[idx];
     if(data){
       const img=new Image();
-      img.onload=()=>{ctx.clearRect(0,0,w*dpr,h*dpr);ctx.drawImage(img,0,0,w*dpr,h*dpr);};
+      img.onload=()=>{ctx.clearRect(0,0,w,h);ctx.fillStyle=BG;ctx.fillRect(0,0,w,h);ctx.drawImage(img,0,0,w,h);};
       img.src=data;
     }
-  },[dpr]);
+  },[]);
 
   const renderOnion=useCallback((idx,onion,w,h)=>{
     const c=onionC.current;if(!c)return;
-    const ctx=c.getContext("2d");ctx.clearRect(0,0,w*dpr,h*dpr);
+    const ctx=c.getContext("2d");
+    ctx.clearRect(0,0,w,h);
     if(onion&&idx>0&&fd.current[idx-1]){
       const p=new Image();
-      p.onload=()=>{ctx.clearRect(0,0,w*dpr,h*dpr);ctx.globalAlpha=0.22;ctx.drawImage(p,0,0,w*dpr,h*dpr);ctx.globalAlpha=1;};
+      p.onload=()=>{ctx.clearRect(0,0,w,h);ctx.globalAlpha=0.25;ctx.drawImage(p,0,0,w,h);ctx.globalAlpha=1;};
       p.src=fd.current[idx-1];
     }
-  },[dpr]);
+  },[]);
 
   useEffect(()=>{
     if(!isPlaying){renderF(current,W,H);renderOnion(current,showOnion,W,H);}
   },[current,showOnion,W,H,renderF,renderOnion,isPlaying]);
 
+  // Canvas physical size = W×H (no dpr scaling; CSS handles display sharpness via width/height 100%)
   useEffect(()=>{
     [drawC,playC,onionC].forEach(ref=>{
       const c=ref.current;if(!c)return;
-      c.width=W*dpr;c.height=H*dpr;
-      const ctx=c.getContext("2d");ctx.scale(dpr,dpr);
+      c.width=W; c.height=H;
     });
     renderF(current,W,H);renderOnion(current,showOnion,W,H);
-  },[W,H,dpr]);
+  },[W,H]);
 
   useEffect(()=>{
     if(!isPlaying){clearTimeout(playTimer.current);return;}
@@ -673,14 +673,17 @@ function App(){
           {/* Canvas */}
           <div style={{flex:1,position:"relative",borderRadius:12,overflow:"hidden",
             border:`1px solid ${C.border}`,background:BG,display:"flex",alignItems:"stretch"}}>
-            <canvas ref={onionC} width={W*dpr} height={H*dpr}
-              style={{position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none"}}/>
-            <canvas ref={drawC} width={W*dpr} height={H*dpr}
-              style={{position:"relative",width:"100%",height:"100%",
-                touchAction:"none",cursor:cursorStyle,background:"transparent",display:isPlaying?"none":"block"}}
+            {/* draw canvas — bottom layer */}
+            <canvas ref={drawC} width={W} height={H}
+              style={{position:"absolute",inset:0,width:"100%",height:"100%",
+                touchAction:"none",cursor:cursorStyle,display:isPlaying?"none":"block"}}
               onMouseDown={startDraw} onMouseMove={onDraw} onMouseUp={endDraw} onMouseLeave={endDraw}
               onTouchStart={startDraw} onTouchMove={onDraw} onTouchEnd={endDraw}/>
-            <canvas ref={playC} width={W*dpr} height={H*dpr}
+            {/* onion canvas — above draw, pointer-events:none */}
+            <canvas ref={onionC} width={W} height={H}
+              style={{position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none",display:isPlaying?"none":"block"}}/>
+            {/* play canvas — top, shown only during playback */}
+            <canvas ref={playC} width={W} height={H}
               style={{position:"absolute",inset:0,width:"100%",height:"100%",display:isPlaying?"block":"none"}}/>
           </div>
 
