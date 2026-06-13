@@ -46,6 +46,7 @@
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.js"></script>
 <script type="text/babel">
 const { useState, useRef, useEffect, useCallback } = React;
 
@@ -95,10 +96,74 @@ const TOOL_GROUPS = [
       { id:"grid",     label:"#",  title:"ガイド表示",   desc:"中央線・グリッドを表示" },
     ]
   },
+  {
+    id:"puppet", label:"🚶", title:"パペット",
+    tools:[
+      { id:"puppet", label:"🚶", title:"棒人間パペット", desc:"関節をドラッグしてポーズ" },
+    ]
+  },
 ];
 
 const ALL_TOOLS = TOOL_GROUPS.flatMap(g=>g.tools);
 const SIZES = [1, 2, 4, 6, 8, 12, 16, 24, 32];
+
+// ── Skeleton definition ──────────────────────────────────────────
+// Each joint has a name and default {x,y} as fraction of canvas W/H.
+// Bones connect two joints and are drawn as thick lines (limbs).
+const SKELETON_JOINTS = [
+  "head","neck","hip",
+  "lShoulder","lElbow","lHand",
+  "rShoulder","rElbow","rHand",
+  "lKnee","lFoot",
+  "rKnee","rFoot",
+];
+
+const SKELETON_BONES = [
+  ["neck","head"],
+  ["neck","hip"],
+  ["neck","lShoulder"],["lShoulder","lElbow"],["lElbow","lHand"],
+  ["neck","rShoulder"],["rShoulder","rElbow"],["rElbow","rHand"],
+  ["hip","lKnee"],["lKnee","lFoot"],
+  ["hip","rKnee"],["rKnee","rFoot"],
+];
+
+function defaultSkeleton(W,H){
+  const cx=W/2, cy=H/2;
+  const s=Math.min(W,H); // scale unit
+  return {
+    head:      {x:cx,        y:cy-0.30*s},
+    neck:      {x:cx,        y:cy-0.18*s},
+    hip:       {x:cx,        y:cy+0.05*s},
+    lShoulder: {x:cx-0.10*s, y:cy-0.15*s},
+    lElbow:    {x:cx-0.18*s, y:cy-0.02*s},
+    lHand:     {x:cx-0.22*s, y:cy+0.12*s},
+    rShoulder: {x:cx+0.10*s, y:cy-0.15*s},
+    rElbow:    {x:cx+0.18*s, y:cy-0.02*s},
+    rHand:     {x:cx+0.22*s, y:cy+0.12*s},
+    lKnee:     {x:cx-0.08*s, y:cy+0.25*s},
+    lFoot:     {x:cx-0.10*s, y:cy+0.42*s},
+    rKnee:     {x:cx+0.08*s, y:cy+0.25*s},
+    rFoot:     {x:cx+0.10*s, y:cy+0.42*s},
+  };
+}
+
+// Draw the stick figure skeleton onto a canvas context
+function drawSkeleton(ctx, skel, color, limbWidth){
+  ctx.strokeStyle=color;ctx.fillStyle=color;
+  ctx.lineCap="round";ctx.lineJoin="round";
+  // limbs
+  ctx.lineWidth=limbWidth;
+  SKELETON_BONES.forEach(([a,b])=>{
+    const pa=skel[a],pb=skel[b];if(!pa||!pb)return;
+    ctx.beginPath();ctx.moveTo(pa.x,pa.y);ctx.lineTo(pb.x,pb.y);ctx.stroke();
+  });
+  // head circle
+  const head=skel.head, neck=skel.neck;
+  if(head&&neck){
+    const r=Math.hypot(head.x-neck.x,head.y-neck.y)*0.9;
+    ctx.beginPath();ctx.arc(head.x,head.y,Math.max(r,limbWidth*1.5),0,Math.PI*2);ctx.stroke();
+  }
+}
 const FPS_PRESETS = [2, 4, 6, 8, 10, 12, 15, 24];
 
 const C = {
@@ -166,6 +231,36 @@ async function doExport(fd,fc,durs,fps,W,H,onP,onDone,onErr){
       onP(Math.round(((i+1)/fc)*100));
     }
     rec.stop();
+  }catch(e){onErr(e.message);}
+}
+
+// GIF export via gif.js (runs entirely client-side using a Web Worker)
+async function doExportGIF(fd,fc,durs,fps,W,H,onP,onDone,onErr){
+  try{
+    if(typeof GIF==="undefined"){onErr("GIFライブラリの読み込みに失敗しました（ネットワーク接続を確認してください）");return;}
+    // gif.js needs its worker script — use CDN URL directly
+    const gif=new GIF({
+      workers:2,
+      quality:10,
+      width:W,
+      height:H,
+      workerScript:"https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.worker.js",
+    });
+    const off=document.createElement("canvas");off.width=W;off.height=H;
+    const ctx=off.getContext("2d");
+    for(let i=0;i<fc;i++){
+      await loadImg(ctx,fd[i],W,H);
+      const dur=durs[i]??Math.round(1000/fps);
+      gif.addFrame(ctx,{copy:true,delay:dur});
+      onP(Math.round((((i+1)/fc)*50))); // first half = frame prep
+    }
+    gif.on("progress",p=>{onP(50+Math.round(p*50));}); // second half = encoding
+    gif.on("finished",blob=>{
+      const url=URL.createObjectURL(blob),a=document.createElement("a");
+      a.href=url;a.download="animation.gif";a.click();URL.revokeObjectURL(url);
+      onDone();
+    });
+    gif.render();
   }catch(e){onErr(e.message);}
 }
 
@@ -375,10 +470,104 @@ function ImagePopup({onImport,onClearSketch,hasSketch,sketchOpacity,onOpacity,on
   </>;
 }
 
+// ── Puppet overlay: draggable joint handles over the canvas ───────
+function PuppetOverlay({skel, color, size, onMoveJoint, W, H}){
+  const containerRef = useRef(null);
+  const dragJoint = useRef(null);
+
+  const toLocal = e => {
+    const r = containerRef.current.getBoundingClientRect();
+    const sx = W/r.width, sy = H/r.height;
+    const src = e.touches?e.touches[0]:e;
+    return { x:(src.clientX-r.left)*sx, y:(src.clientY-r.top)*sy };
+  };
+
+  const onJointDown = (jointName) => (e) => {
+    e.preventDefault(); e.stopPropagation();
+    dragJoint.current = jointName;
+  };
+  const onMove = (e) => {
+    if(!dragJoint.current) return;
+    e.preventDefault();
+    onMoveJoint(dragJoint.current, toLocal(e));
+  };
+  const onUp = () => { dragJoint.current = null; };
+
+  return (
+    <div ref={containerRef}
+      style={{position:"absolute",inset:0,width:"100%",height:"100%",touchAction:"none"}}
+      onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}
+      onTouchMove={onMove} onTouchEnd={onUp}>
+      {/* SVG for bones */}
+      <svg viewBox={`0 0 ${W} ${H}`} style={{position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none"}}>
+        {SKELETON_BONES.map(([a,b],i)=>{
+          const pa=skel[a],pb=skel[b];if(!pa||!pb)return null;
+          return <line key={i} x1={pa.x} y1={pa.y} x2={pb.x} y2={pb.y}
+            stroke={color} strokeWidth={Math.max(4,size)} strokeLinecap="round" opacity={0.85}/>;
+        })}
+        {skel.head&&skel.neck&&(()=>{
+          const r=Math.max(Math.hypot(skel.head.x-skel.neck.x,skel.head.y-skel.neck.y)*0.9, Math.max(4,size)*1.5);
+          return <circle cx={skel.head.x} cy={skel.head.y} r={r} stroke={color} strokeWidth={Math.max(4,size)} fill="none" opacity={0.85}/>;
+        })()}
+      </svg>
+      {/* Joint handles */}
+      {SKELETON_JOINTS.map(j=>{
+        const p=skel[j];if(!p)return null;
+        const pct = {left:`${(p.x/W)*100}%`, top:`${(p.y/H)*100}%`};
+        const isMain = j==="head"||j==="hip"||j==="neck";
+        return (
+          <div key={j}
+            onMouseDown={onJointDown(j)} onTouchStart={onJointDown(j)}
+            style={{
+              position:"absolute", ...pct,
+              width: isMain?28:22, height: isMain?28:22,
+              marginLeft: isMain?-14:-11, marginTop: isMain?-14:-11,
+              borderRadius:99,
+              background: isMain?"rgba(37,99,235,0.25)":"rgba(34,197,94,0.25)",
+              border:`2px solid ${isMain?"#2563eb":"#22c55e"}`,
+              cursor:"grab", touchAction:"none",
+            }}/>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Export format popup ──────────────────────────────────────────
+function ExportPopup({onExport, onClose, anchorRef, frameCount, fps, W, H}){
+  const pos = popupPos(anchorRef, 240, 260);
+  const totalSec = (frameCount/fps).toFixed(1);
+  return <>
+    <div className="backdrop" onPointerDown={onClose}/>
+    <div className="popup" style={{...pos, width:240}}>
+      <div style={{fontSize:12,color:C.hint,marginBottom:4,letterSpacing:"0.06em"}}>書き出し形式</div>
+      <div style={{fontSize:11,color:C.hint,marginBottom:12}}>{W}×{H} ・ {frameCount}フレーム ・ 約{totalSec}秒</div>
+      <div onClick={()=>{onExport("webm");onClose();}} style={{
+        display:"flex",alignItems:"center",gap:12,padding:"12px 14px",borderRadius:10,cursor:"pointer",
+        background:C.blueBg,border:`1px solid ${C.blue}`,marginBottom:8}}>
+        <span style={{fontSize:22}}>🎬</span>
+        <div>
+          <div style={{fontSize:14,fontWeight:500,color:C.blue}}>動画 (WebM)</div>
+          <div style={{fontSize:11,color:C.hint,marginTop:2}}>高画質・音声編集に最適</div>
+        </div>
+      </div>
+      <div onClick={()=>{onExport("gif");onClose();}} style={{
+        display:"flex",alignItems:"center",gap:12,padding:"12px 14px",borderRadius:10,cursor:"pointer",
+        background:C.greenBg,border:`1px solid ${C.green}`}}>
+        <span style={{fontSize:22}}>🖼</span>
+        <div>
+          <div style={{fontSize:14,fontWeight:500,color:"#15803d"}}>GIF アニメ</div>
+          <div style={{fontSize:11,color:C.hint,marginTop:2}}>SNS共有に便利・ループ再生</div>
+        </div>
+      </div>
+    </div>
+  </>;
+}
+
 // ── Shared button primitives ──────────────────────────────────────
-function Btn({children,onClick,primary,danger,disabled,style={}}){
+const Btn = React.forwardRef(function Btn({children,onClick,primary,danger,disabled,style={}},ref){
   return(
-    <button onClick={onClick} disabled={disabled} style={{
+    <button ref={ref} onClick={onClick} disabled={disabled} style={{
       display:"flex",alignItems:"center",justifyContent:"center",gap:6,
       height:44,padding:"0 14px",
       background:primary?C.blue:danger?C.redBg:C.panel,
@@ -387,7 +576,7 @@ function Btn({children,onClick,primary,danger,disabled,style={}}){
       fontSize:14,opacity:disabled?0.4:1,whiteSpace:"nowrap",flexShrink:0,...style,
     }}>{children}</button>
   );
-}
+});
 
 // ── Main App ──────────────────────────────────────────────────────
 function App(){
@@ -415,6 +604,10 @@ function App(){
   const[sketchOpacity,setSketchOpacity]=useState(0.35);
   const[showGrid,setShowGrid]=useState(false);
 
+  // Puppet: per-frame skeleton pose. {frameIdx: {jointName:{x,y},...}}
+  const[puppets,setPuppets]=useState({});
+  const[draggingJoint,setDraggingJoint]=useState(null);
+
   const[isPlaying,setIsPlaying]=useState(false);
   const[fps,setFps]=useState(8);
   const[durs,setDurs]=useState([null]);
@@ -431,6 +624,7 @@ function App(){
   const colorBtnRef=useRef(null);
   const fpsBtnRef=useRef(null);
   const imgBtnRef=useRef(null);
+  const exportBtnRef=useRef(null);
 
   const drawC=useRef(null),playC=useRef(null),onionC=useRef(null),imgC=useRef(null);
   const drawing=useRef(false),lastP=useRef(null),shapeStart=useRef(null),snapshotBefore=useRef(null);
@@ -564,8 +758,52 @@ function App(){
   };
 
   const isShapeTool=TOOL_GROUPS[1].tools.some(t2=>t2.id===tool);
+  const isPuppetTool=tool==="puppet";
   const activeTool=ALL_TOOLS.find(t=>t.id===tool)||ALL_TOOLS[0];
   const activeGroup=TOOL_GROUPS.find(g=>g.tools.some(t=>t.id===tool));
+
+  // Get current frame's skeleton (create default if missing)
+  const getSkeleton=useCallback((idx)=>{
+    return puppets[idx] || defaultSkeleton(W,H);
+  },[puppets,W,H]);
+
+  const addPuppet=useCallback(()=>{
+    pushUndo(current);
+    setPuppets(prev=>({...prev,[current]:defaultSkeleton(W,H)}));
+    flash("パペットを追加しました");
+  },[current,W,H,pushUndo,flash]);
+
+  const bakePuppet=useCallback(()=>{
+    const skel=puppets[current];
+    if(!skel)return;
+    pushUndo(current);
+    const ctx=drawC.current.getContext("2d");
+    drawSkeleton(ctx,skel,color,Math.max(4,size));
+    saveF(current);
+    setPuppets(prev=>{const n={...prev};delete n[current];return n;});
+    flash("パペットを描画に焼き込みました");
+  },[puppets,current,color,size,pushUndo,saveF,flash]);
+
+  const removePuppet=useCallback(()=>{
+    setPuppets(prev=>{const n={...prev};delete n[current];return n;});
+  },[current]);
+
+  const moveJoint=useCallback((jointName,pos)=>{
+    setPuppets(prev=>{
+      const skel=prev[current]||defaultSkeleton(W,H);
+      return {...prev,[current]:{...skel,[jointName]:pos}};
+    });
+  },[current,W,H]);
+
+  // Copy current frame's pose to next frame (useful for animating)
+  const copyPuppetToNext=useCallback(()=>{
+    const skel=puppets[current];
+    if(!skel)return;
+    if(current+1>=frameCount)addFrame();
+    setTimeout(()=>{
+      setPuppets(prev=>({...prev,[current+1]:JSON.parse(JSON.stringify(skel))}));
+    },50);
+  },[puppets,current,frameCount]);
 
   const gp=e=>{
     const r=drawC.current.getBoundingClientRect(),sx=W/r.width,sy=H/r.height;
@@ -594,7 +832,9 @@ function App(){
   };
 
   const startDraw=e=>{
-    if(isPlaying)return;e.preventDefault();closePopup();
+    if(isPlaying)return;
+    if(isPuppetTool)return; // puppet uses its own joint handles, not canvas drawing
+    e.preventDefault();closePopup();
     const pos=gp(e);
 
     if(tool==="eyedrop"){
@@ -731,9 +971,13 @@ function App(){
   };
   const clearSketch=()=>{setSketches(prev=>{const n={...prev};delete n[current];return n;});flash("下絵を削除しました");};
 
-  const handleExport=async()=>{
+  const handleExport=async(format)=>{
     saveF(current);setExporting(true);setExportPct(0);
-    await doExport(fd.current,frameCount,durs,fps,W,H,p=>setExportPct(p),()=>{setExporting(false);flash("書き出し完了");},e=>{setExporting(false);flash("エラー: "+e,false);});
+    if(format==="gif"){
+      await doExportGIF(fd.current,frameCount,durs,fps,W,H,p=>setExportPct(p),()=>{setExporting(false);flash("GIFを書き出しました");},e=>{setExporting(false);flash("エラー: "+e,false);});
+    }else{
+      await doExport(fd.current,frameCount,durs,fps,W,H,p=>setExportPct(p),()=>{setExporting(false);flash("動画を書き出しました");},e=>{setExporting(false);flash("エラー: "+e,false);});
+    }
   };
 
   const defDur=Math.round(1000/fps);
@@ -761,6 +1005,7 @@ function App(){
       {popup==="color"&&<ColorPopup color={color} customColors={customColors} onSelect={setColor} onAddCustom={addCustomColor} onClose={closePopup} anchorRef={colorBtnRef}/>}
       {popup==="fps"&&<FpsPopup fps={fps} onSelect={setFps} onClose={closePopup} anchorRef={fpsBtnRef}/>}
       {popup==="img"&&<ImagePopup onImport={importImage} onClearSketch={clearSketch} hasSketch={!!sketches[current]} sketchOpacity={sketchOpacity} onOpacity={setSketchOpacity} onClose={closePopup} anchorRef={imgBtnRef}/>}
+      {popup==="export"&&<ExportPopup onExport={handleExport} onClose={closePopup} anchorRef={exportBtnRef} frameCount={frameCount} fps={fps} W={W} H={H}/>}
 
       {/* ── Top bar ── */}
       <div style={{background:C.panel,borderBottom:`1px solid ${C.border}`,
@@ -844,7 +1089,7 @@ function App(){
         </button>
 
         <div style={{width:1,height:20,background:C.border}}/>
-        <Btn onClick={handleExport} primary disabled={exporting} style={{height:40,fontSize:13}}>
+        <Btn ref={exportBtnRef} onClick={()=>openPopup("export")} primary disabled={exporting} style={{height:40,fontSize:13}}>
           {exporting?`${exportPct}%`:"▶ 書き出し"}
         </Btn>
       </div>
@@ -959,9 +1204,33 @@ function App(){
                 <div style={{position:"absolute",top:"66.666%",left:0,right:0,height:1,background:"rgba(37,99,235,0.15)"}}/>
               </div>
             )}
+            {/* Puppet overlay */}
+            {isPuppetTool&&!isPlaying&&puppets[current]&&(
+              <PuppetOverlay skel={puppets[current]} color={color} size={size}
+                onMoveJoint={moveJoint} W={W} H={H}/>
+            )}
           </div>
 
-          {/* Frame actions */}
+          {/* Puppet controls */}
+          {isPuppetTool&&!isPlaying&&(
+            <div style={{display:"flex",gap:6,flexShrink:0}}>
+              {!puppets[current] ? (
+                <Btn onClick={addPuppet} primary style={{flex:1,height:42,fontSize:13}}>
+                  🚶 パペットを追加
+                </Btn>
+              ) : (<>
+                <Btn onClick={copyPuppetToNext} style={{flex:1,height:42,fontSize:13}}>
+                  → 次フレームにコピー
+                </Btn>
+                <Btn onClick={bakePuppet} primary style={{flex:1,height:42,fontSize:13}}>
+                  ✓ 描画に焼き込む
+                </Btn>
+                <Btn onClick={removePuppet} danger style={{flex:1,height:42,fontSize:13}}>
+                  ✕ パペット削除
+                </Btn>
+              </>)}
+            </div>
+          )}
           <div style={{display:"flex",gap:6,flexShrink:0}}>
             <button onClick={()=>current>0&&switchF(current-1)}
               style={{height:42,width:42,background:C.panel,border:`1px solid ${C.border}`,borderRadius:10,fontSize:16,color:C.muted,flexShrink:0}}>◀</button>
