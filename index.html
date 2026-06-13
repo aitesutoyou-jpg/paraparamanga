@@ -87,6 +87,14 @@ const TOOL_GROUPS = [
       { id:"ellipsef",  label:"●", title:"丸（塗り）",   desc:"塗りつぶし" },
     ]
   },
+  {
+    id:"util", label:"✦", title:"便利",
+    tools:[
+      { id:"eyedrop",  label:"💧", title:"スポイト",     desc:"キャンバスの色を取得" },
+      { id:"symmetry", label:"⇋",  title:"左右対称ペン", desc:"鏡のように両側に描画" },
+      { id:"grid",     label:"#",  title:"ガイド表示",   desc:"中央線・グリッドを表示" },
+    ]
+  },
 ];
 
 const ALL_TOOLS = TOOL_GROUPS.flatMap(g=>g.tools);
@@ -175,8 +183,8 @@ function popupPos(anchorRef, width, height=400){
 }
 
 // ── Tool popup ────────────────────────────────────────────────────
-function ToolPopup({tool, onSelect, onClose, anchorRef}){
-  const pos = popupPos(anchorRef, 280, 420);
+function ToolPopup({tool, showGrid, onSelect, onClose, anchorRef}){
+  const pos = popupPos(anchorRef, 280, 460);
   const currentGroup = TOOL_GROUPS.find(g=>g.tools.some(t=>t.id===tool));
   const [activeGroup, setActiveGroup] = useState(currentGroup?.id || "draw");
   const group = TOOL_GROUPS.find(g=>g.id===activeGroup);
@@ -196,21 +204,25 @@ function ToolPopup({tool, onSelect, onClose, anchorRef}){
       </div>
       {/* Tools in group */}
       <div style={{display:"flex",flexDirection:"column",gap:4}}>
-        {group.tools.map(t=>(
-          <div key={t.id} onClick={()=>{onSelect(t.id);onClose();}} style={{
-            display:"flex",alignItems:"center",gap:14,padding:"10px 12px",
-            borderRadius:10,cursor:"pointer",
-            background:tool===t.id?C.blueBg:"transparent",
-            border:`1px solid ${tool===t.id?C.blue:C.border}`,
-          }}>
-            <span style={{fontSize:22,width:28,textAlign:"center",flexShrink:0}}>{t.label}</span>
-            <div>
-              <div style={{fontSize:14,fontWeight:500,color:tool===t.id?C.blue:C.text}}>{t.title}</div>
-              <div style={{fontSize:11,color:C.hint,marginTop:2}}>{t.desc}</div>
+        {group.tools.map(t=>{
+          const isGrid = t.id==="grid";
+          const isActive = isGrid ? showGrid : tool===t.id;
+          return (
+            <div key={t.id} onClick={()=>onSelect(t.id)} style={{
+              display:"flex",alignItems:"center",gap:14,padding:"10px 12px",
+              borderRadius:10,cursor:"pointer",
+              background:isActive?C.blueBg:"transparent",
+              border:`1px solid ${isActive?C.blue:C.border}`,
+            }}>
+              <span style={{fontSize:22,width:28,textAlign:"center",flexShrink:0}}>{t.label}</span>
+              <div>
+                <div style={{fontSize:14,fontWeight:500,color:isActive?C.blue:C.text}}>{t.title}</div>
+                <div style={{fontSize:11,color:C.hint,marginTop:2}}>{isGrid?(showGrid?"表示中（タップで非表示）":"中央線・グリッドを表示"):t.desc}</div>
+              </div>
+              {isActive&&<div style={{marginLeft:"auto",color:C.blue,fontSize:16}}>✓</div>}
             </div>
-            {tool===t.id&&<div style={{marginLeft:"auto",color:C.blue,fontSize:16}}>✓</div>}
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   </>;
@@ -401,6 +413,7 @@ function App(){
   });
   const[sketches,setSketches]=useState({});
   const[sketchOpacity,setSketchOpacity]=useState(0.35);
+  const[showGrid,setShowGrid]=useState(false);
 
   const[isPlaying,setIsPlaying]=useState(false);
   const[fps,setFps]=useState(8);
@@ -409,6 +422,7 @@ function App(){
   const[exporting,setExporting]=useState(false);
   const[exportPct,setExportPct]=useState(0);
   const[toast,setToast]=useState(null);
+  const[canUndo,setCanUndo]=useState(false);
 
   // popup: null | "tool" | "size" | "color" | "fps" | "img"
   const[popup,setPopup]=useState(null);
@@ -421,6 +435,30 @@ function App(){
   const drawC=useRef(null),playC=useRef(null),onionC=useRef(null),imgC=useRef(null);
   const drawing=useRef(false),lastP=useRef(null),shapeStart=useRef(null),snapshotBefore=useRef(null);
   const playTimer=useRef(null);
+
+  // Undo history: per-frame stack of dataURLs (max 20 steps)
+  const undoStacks=useRef({}); // {frameIdx: [dataUrl, dataUrl, ...]}
+  const MAX_UNDO=20;
+
+  const pushUndo=useCallback((idx)=>{
+    const c=drawC.current;if(!c)return;
+    const stack=undoStacks.current[idx]||(undoStacks.current[idx]=[]);
+    stack.push(c.toDataURL());
+    if(stack.length>MAX_UNDO)stack.shift();
+    setCanUndo(true);
+  },[]);
+
+  const undo=useCallback(()=>{
+    const stack=undoStacks.current[current];
+    if(!stack||stack.length===0)return;
+    const prev=stack.pop();
+    const ctx=drawC.current.getContext("2d");
+    const img=new Image();
+    img.onload=()=>{ctx.clearRect(0,0,W,H);ctx.drawImage(img,0,0,W,H);saveF(current,false);};
+    img.src=prev;
+    setCanUndo((undoStacks.current[current]||[]).length>0);
+  },[current,W,H]);
+
 
   const flash=useCallback((msg,ok=true)=>{setToast({msg,ok});setTimeout(()=>setToast(null),2200);},[]);
 
@@ -525,7 +563,7 @@ function App(){
     function chk(){done++;if(done===keys.length){fd.current=nd;thumbs.current=nd;setW(nw);setH(nh);bump();setShowRes(false);}}
   };
 
-  const isShapeTool=ALL_TOOLS.find(t=>t.id===tool)?.id&&TOOL_GROUPS[1].tools.some(t2=>t2.id===tool);
+  const isShapeTool=TOOL_GROUPS[1].tools.some(t2=>t2.id===tool);
   const activeTool=ALL_TOOLS.find(t=>t.id===tool)||ALL_TOOLS[0];
   const activeGroup=TOOL_GROUPS.find(g=>g.tools.some(t=>t.id===tool));
 
@@ -535,18 +573,50 @@ function App(){
     return{x:(src.clientX-r.left)*sx,y:(src.clientY-r.top)*sy};
   };
 
+  // Symmetry pen: draw a stamp/line segment mirrored across vertical center
+  const mirrorX = x => W - x;
+
+  const drawStamp=(ctx,x,y)=>{
+    if(tool==="brush"){
+      for(let i=0;i<16;i++){const a=Math.random()*Math.PI*2,r=Math.random()*size*2;ctx.beginPath();ctx.arc(x+Math.cos(a)*r,y+Math.sin(a)*r,size*0.3,0,Math.PI*2);ctx.fillStyle=color;ctx.fill();}
+    }else{
+      ctx.beginPath();ctx.arc(x,y,size/2,0,Math.PI*2);ctx.fillStyle=tool==="eraser"?BG:color;ctx.fill();
+    }
+  };
+  const drawStroke=(ctx,fromX,fromY,toX,toY)=>{
+    if(tool==="brush"){
+      const dx=toX-fromX,dy=toY-fromY,dist=Math.sqrt(dx*dx+dy*dy),steps=Math.max(1,Math.floor(dist/5));
+      for(let s=0;s<=steps;s++){const tx=fromX+dx*(s/steps),ty=fromY+dy*(s/steps);for(let i=0;i<8;i++){const a=Math.random()*Math.PI*2,r=Math.random()*size*2;ctx.beginPath();ctx.arc(tx+Math.cos(a)*r,ty+Math.sin(a)*r,size*0.3,0,Math.PI*2);ctx.fillStyle=color;ctx.fill();}}
+    }else{
+      ctx.beginPath();ctx.moveTo(fromX,fromY);ctx.lineTo(toX,toY);
+      ctx.strokeStyle=tool==="eraser"?BG:color;ctx.lineWidth=size;ctx.lineCap="round";ctx.lineJoin="round";ctx.stroke();
+    }
+  };
+
   const startDraw=e=>{
     if(isPlaying)return;e.preventDefault();closePopup();
     const pos=gp(e);
-    if(tool==="fill"){floodFill(drawC.current.getContext("2d"),pos.x,pos.y,color,W,H);saveF(current);return;}
+
+    if(tool==="eyedrop"){
+      const ctx=drawC.current.getContext("2d");
+      const px=ctx.getImageData(Math.floor(pos.x),Math.floor(pos.y),1,1).data;
+      const hex="#"+[px[0],px[1],px[2]].map(v=>v.toString(16).padStart(2,"0")).join("");
+      setColor(hex);addCustomColor(hex);
+      return;
+    }
+
+    if(tool==="fill"){
+      pushUndo(current);
+      floodFill(drawC.current.getContext("2d"),pos.x,pos.y,color,W,H);saveF(current);return;
+    }
+
+    pushUndo(current);
     drawing.current=true;lastP.current=pos;
     if(isShapeTool){shapeStart.current=pos;snapshotBefore.current=drawC.current.toDataURL();return;}
+
     const ctx=drawC.current.getContext("2d");
-    if(tool==="brush"){
-      for(let i=0;i<16;i++){const a=Math.random()*Math.PI*2,r=Math.random()*size*2;ctx.beginPath();ctx.arc(pos.x+Math.cos(a)*r,pos.y+Math.sin(a)*r,size*0.3,0,Math.PI*2);ctx.fillStyle=color;ctx.fill();}
-    }else{
-      ctx.beginPath();ctx.arc(pos.x,pos.y,size/2,0,Math.PI*2);ctx.fillStyle=tool==="eraser"?BG:color;ctx.fill();
-    }
+    drawStamp(ctx,pos.x,pos.y);
+    if(tool==="symmetry")drawStamp(ctx,mirrorX(pos.x),pos.y);
   };
 
   const onDraw=e=>{
@@ -557,12 +627,9 @@ function App(){
       img.onload=()=>{ctx.clearRect(0,0,W,H);ctx.drawImage(img,0,0,W,H);drawShape(ctx,tool,shapeStart.current.x,shapeStart.current.y,pos.x,pos.y,color,size);};
       img.src=snapshotBefore.current;return;
     }
-    if(tool==="brush"){
-      const dx=pos.x-lastP.current.x,dy=pos.y-lastP.current.y,dist=Math.sqrt(dx*dx+dy*dy),steps=Math.max(1,Math.floor(dist/5));
-      for(let s=0;s<=steps;s++){const tx=lastP.current.x+dx*(s/steps),ty=lastP.current.y+dy*(s/steps);for(let i=0;i<8;i++){const a=Math.random()*Math.PI*2,r=Math.random()*size*2;ctx.beginPath();ctx.arc(tx+Math.cos(a)*r,ty+Math.sin(a)*r,size*0.3,0,Math.PI*2);ctx.fillStyle=color;ctx.fill();}}
-    }else{
-      ctx.beginPath();ctx.moveTo(lastP.current.x,lastP.current.y);ctx.lineTo(pos.x,pos.y);
-      ctx.strokeStyle=tool==="eraser"?BG:color;ctx.lineWidth=size;ctx.lineCap="round";ctx.lineJoin="round";ctx.stroke();
+    drawStroke(ctx,lastP.current.x,lastP.current.y,pos.x,pos.y);
+    if(tool==="symmetry"){
+      drawStroke(ctx,mirrorX(lastP.current.x),lastP.current.y,mirrorX(pos.x),pos.y);
     }
     lastP.current=pos;
   };
@@ -578,25 +645,39 @@ function App(){
     drawing.current=false;saveF(current);
   };
 
-  const switchF=idx=>{saveF(current);setCurrent(idx);};
+  const switchF=idx=>{
+    saveF(current);setCurrent(idx);
+    setCanUndo((undoStacks.current[idx]||[]).length>0);
+  };
   const addFrame=()=>{
     if(frameCount>=MAX_FRAMES)return;saveF(current);
-    const ni=current+1,nfd={},nth={};
-    for(let k=0;k<frameCount;k++){const ki=k>=ni?k+1:k;if(fd.current[k]){nfd[ki]=fd.current[k];nth[ki]=thumbs.current[k];}}
-    fd.current=nfd;thumbs.current=nth;
+    const ni=current+1,nfd={},nth={},nundo={};
+    for(let k=0;k<frameCount;k++){
+      const ki=k>=ni?k+1:k;
+      if(fd.current[k]){nfd[ki]=fd.current[k];nth[ki]=thumbs.current[k];}
+      if(undoStacks.current[k]){nundo[ki]=undoStacks.current[k];}
+    }
+    fd.current=nfd;thumbs.current=nth;undoStacks.current=nundo;
     setDurs(d=>{const n=[...d];n.splice(ni,0,null);return n;});
-    setFrameCount(fc=>fc+1);setCurrent(ni);
+    setFrameCount(fc=>fc+1);setCurrent(ni);setCanUndo(false);
   };
   const deleteFrame=()=>{
-    if(frameCount<=1)return;const di=current,nfd={},nth={};
-    for(let k=0;k<frameCount;k++){if(k===di)continue;const ki=k>di?k-1:k;if(fd.current[k]){nfd[ki]=fd.current[k];nth[ki]=thumbs.current[k];}}
-    fd.current=nfd;thumbs.current=nth;
+    if(frameCount<=1)return;const di=current,nfd={},nth={},nundo={};
+    for(let k=0;k<frameCount;k++){
+      if(k===di)continue;
+      const ki=k>di?k-1:k;
+      if(fd.current[k]){nfd[ki]=fd.current[k];nth[ki]=thumbs.current[k];}
+      if(undoStacks.current[k]){nundo[ki]=undoStacks.current[k];}
+    }
+    fd.current=nfd;thumbs.current=nth;undoStacks.current=nundo;
     setDurs(d=>{const n=[...d];n.splice(di,1);return n;});
     setFrameCount(fc=>fc-1);
     const nc=Math.min(di,frameCount-2);setCurrent(nc);
+    setCanUndo((undoStacks.current[nc]||[]).length>0);
     setTimeout(()=>renderF(nc,W,H),30);
   };
   const clearFrame=()=>{
+    pushUndo(current);
     const ctx=drawC.current.getContext("2d");ctx.clearRect(0,0,W,H);ctx.fillStyle=BG;ctx.fillRect(0,0,W,H);
     delete fd.current[current];delete thumbs.current[current];bump();
   };
@@ -673,7 +754,9 @@ function App(){
       )}
 
       {/* Popups */}
-      {popup==="tool"&&<ToolPopup tool={tool} onSelect={setTool} onClose={closePopup} anchorRef={toolBtnRef}/>}
+      {popup==="tool"&&<ToolPopup tool={tool} showGrid={showGrid}
+        onSelect={t=>{ if(t==="grid"){ setShowGrid(g=>!g); } else { setTool(t); closePopup(); } }}
+        onClose={closePopup} anchorRef={toolBtnRef}/>}
       {popup==="size"&&<SizePopup size={size} onSelect={setSize} onClose={closePopup} anchorRef={sizeBtnRef}/>}
       {popup==="color"&&<ColorPopup color={color} customColors={customColors} onSelect={setColor} onAddCustom={addCustomColor} onClose={closePopup} anchorRef={colorBtnRef}/>}
       {popup==="fps"&&<FpsPopup fps={fps} onSelect={setFps} onClose={closePopup} anchorRef={fpsBtnRef}/>}
@@ -693,7 +776,16 @@ function App(){
 
         <div style={{width:1,height:20,background:C.border}}/>
 
-        {/* Resolution */}
+        {/* Undo */}
+        <button onClick={undo} disabled={!canUndo} style={{
+          height:40,padding:"0 12px",
+          background:C.panel,border:`1px solid ${C.border}`,
+          borderRadius:10,fontSize:16,color:canUndo?C.text:C.hint,
+          opacity:canUndo?1:0.4}}>
+          ↶
+        </button>
+
+        <div style={{width:1,height:20,background:C.border}}/>
         <div style={{position:"relative"}}>
           <button onClick={()=>setShowRes(p=>!p)} style={{
             height:40,padding:"0 10px",background:C.panel,border:`1px solid ${C.border}`,
@@ -853,6 +945,20 @@ function App(){
             <canvas ref={playC} width={W} height={H}
               style={{position:"absolute",inset:0,width:"100%",height:"100%",
                 display:isPlaying?"block":"none"}}/>
+            {/* Guide grid overlay */}
+            {showGrid&&!isPlaying&&(
+              <div style={{position:"absolute",inset:0,pointerEvents:"none"}}>
+                {/* center vertical */}
+                <div style={{position:"absolute",left:"50%",top:0,bottom:0,width:1,background:"rgba(37,99,235,0.4)"}}/>
+                {/* center horizontal */}
+                <div style={{position:"absolute",top:"50%",left:0,right:0,height:1,background:"rgba(37,99,235,0.4)"}}/>
+                {/* thirds */}
+                <div style={{position:"absolute",left:"33.333%",top:0,bottom:0,width:1,background:"rgba(37,99,235,0.15)"}}/>
+                <div style={{position:"absolute",left:"66.666%",top:0,bottom:0,width:1,background:"rgba(37,99,235,0.15)"}}/>
+                <div style={{position:"absolute",top:"33.333%",left:0,right:0,height:1,background:"rgba(37,99,235,0.15)"}}/>
+                <div style={{position:"absolute",top:"66.666%",left:0,right:0,height:1,background:"rgba(37,99,235,0.15)"}}/>
+              </div>
+            )}
           </div>
 
           {/* Frame actions */}
